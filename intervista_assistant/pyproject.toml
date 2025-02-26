@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "intervista-assistant"
+version = "0.1.0"
+description = ""
+authors = ["Carlo Giuseppe Sergi <c.sergi@icloud.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+openai = "^1.64.0"
+pyqt5 = "^5.15.11"
+python-dotenv = "^1.0.1"
+pillow = "^11.1.0"
+pyperclip = "^1.9.0"
+pyautogui = "^0.9.54"
+requests = "^2.32.3"
+pyaudio = "^0.2.14"
+websockets = "^15.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

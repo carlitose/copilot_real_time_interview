@@ -1,33 +1,100 @@
-Nel caso il progetto sia sotto licenza Apache 2.0, ecco come dovrebbe apparire il readme:
+# Intervista Assistant
 
-# Copilot Realtime Interviewer
+Un assistente per i colloqui di lavoro per sviluppatori software che utilizza GPT-4o Audio di OpenAI.
 
-## Overview
+## Descrizione
 
-Copilot Realtime Interviewer is an open-source Jupyter notebook designed to facilitate interactive, real-time interviews. This tool harnesses the power of real-time speech-to-text transcription and AI to ensure smooth and direct communication, making the interviewing experience more engaging and efficient for all participants.
+Intervista Assistant è un'applicazione desktop che aiuta gli sviluppatori software durante i colloqui di lavoro tecnici. L'applicazione registra l'audio dell'intervista, lo trascrive usando GPT-4o Audio, rileva le domande tecniche e genera risposte dettagliate utilizzando GPT-4o.
 
-## Features
+Le risposte vengono mostrate sia nell'interfaccia principale che in popup facilmente consultabili durante l'intervista.
 
-1. **Real-time transcription**: Uses AssemblyAI for real-time speech-to-text transcription to convert spoken language into written text.
-2. **AI integration**: Integrated with OpenAI's GPT model for enriching the interview interaction.
-3. **Interactive interface**: A clear and user-friendly interface allowing seamless conversation between the interviewee and AI.
+## Caratteristiche Principali
 
-## Setup
+- **Trascrizione Audio in Tempo Reale**: Registra e trascrive l'audio durante le interviste.
+- **Rilevamento Automatico di Domande**: Rileva automaticamente quando viene posta una domanda.
+- **Risposte Tecniche Dettagliate**: Genera risposte tecniche utilizzando GPT-4o.
+- **Popup con Risposte**: Mostra le risposte in popup per facile consultazione durante l'intervista.
+- **Funzionalità Screenshot**: Permette di catturare, salvare e condividere schermate dell'intervista.
+- **Salvataggio delle Conversazioni**: Salva l'intera conversazione in formato JSON.
 
-To use the "Copilot Realtime Interviewer", you will need to:
+## Requisiti
 
-1. Clone the repository.
-    ```
-    git clone https://github.com/your_github_username/copilot_real_time_interview.git
-    ```
-2. Obtain API keys from both AssemblyAI for the transcription service and OpenAI for the AI model. You need to set these keys as environment variables or replace them in the appropriate place in the code.
+- Python 3.8 o superiore
+- API key OpenAI (per utilizzare GPT-4o)
+- Le dipendenze elencate in `requirements.txt`
 
-3. Open the Jupyter notebook and run the cells from top to bottom to start the interviewing process.
+## Installazione
 
-## Contributions
+1. Clona il repository o scarica i file:
+   ```
+   git clone https://github.com/tuo-username/intervista-assistant.git
+   cd intervista-assistant
+   ```
 
-Feel free to fork the project, open issues, propose changes or make a Pull-Request. All forms of contribution are warmly welcomed from the community.
+2. Installa le dipendenze:
+   ```
+   pip install -r intervista_assistant/requirements.txt
+   ```
 
-## License
+3. Crea un file `.env` nella directory `intervista_assistant` basato sul file `.env.example`:
+   ```
+   cp intervista_assistant/.env.example intervista_assistant/.env
+   ```
 
-Copilot Realtime Interviewer is open-source software licensed under the [Apache 2.0 license](LICENSE).
+4. Modifica il file `.env` inserendo la tua API key OpenAI:
+   ```
+   OPENAI_API_KEY=your-openai-api-key-here
+   ```
+
+## Utilizzo
+
+Puoi avviare l'applicazione in uno dei seguenti modi:
+
+1. Eseguendo lo script principale:
+   ```
+   python run.py
+   ```
+
+2. Eseguendo il launcher dall'interno della directory intervista_assistant:
+   ```
+   cd intervista_assistant
+   python launcher.py
+   ```
+
+## Guida all'Uso
+
+1. Premi il pulsante "Inizia Registrazione" per iniziare a registrare l'audio.
+2. Parla chiaramente, facendo domande tecniche relative allo sviluppo software.
+3. L'applicazione rileverà automaticamente le domande e genererà risposte.
+4. Le risposte appariranno nell'area "Risposta" e in un popup.
+5. Usa il pulsante "Screenshot" per catturare lo schermo durante l'intervista.
+6. Il pulsante "Condividi Screenshot" permette di salvare e copiare il percorso dell'immagine.
+7. Alla fine dell'intervista, usa "Salva Conversazione" per salvare la conversazione in JSON.
+
+## Struttura del Progetto
+
+```
+intervista_assistant/
+├── __init__.py
+├── main.py           # Applicazione principale
+├── launcher.py       # Script di avvio
+├── requirements.txt  # Dipendenze
+├── setup.py          # Script di installazione
+├── .env.example      # Esempio per configurazione
+├── README.md         # Documentazione
+└── utils/            # Moduli di utilità
+    ├── __init__.py
+    ├── question_detector.py  # Rilevatore di domande
+    └── screenshot_utils.py   # Utilità per screenshot
+```
+
+## Licenza
+
+MIT
+
+## Riconoscimenti
+
+Questo progetto è basato su:
+- OpenAI GPT-4o per la generazione delle risposte
+- OpenAI Whisper per la trascrizione audio
+- PyQt5 per l'interfaccia grafica
