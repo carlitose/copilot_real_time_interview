@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 class RealtimeTextThread(QThread):
-    """Thread per comunicazione testuale usando OpenAI Realtime API."""
+    """Thread per comunicazione testuale (e audio) usando la Realtime API."""
     transcription_signal = pyqtSignal(str)
     response_signal = pyqtSignal(str)
     error_signal = pyqtSignal(str)
@@ -61,33 +61,36 @@ class RealtimeTextThread(QThread):
         
         # Configurazione per il rilevamento delle pause
         self.last_audio_commit_time = 0
-        self.silence_threshold = 500  # Valore RMS per definire il silenzio
-        self.pause_duration = 0.7  # Secondi di pausa che attivano un commit
-        self.min_commit_interval = 1.5  # Minimo intervallo tra commit
+        self.silence_threshold = 500  # valore RMS per definire il silenzio
+        self.pause_duration = 0.7       # secondi di pausa per attivare il commit
+        self.min_commit_interval = 1.5  # minimo intervallo tra commit
         self.is_speaking = False
         self.silence_start_time = 0
         self.last_commit_time = 0
         self.response_pending = False
-        self.buffer_size_to_send = 40  # Circa 2.5 secondi di audio
+        self.buffer_size_to_send = 40   # circa 2.5 secondi di audio
         
+        # Variabile per contenere (eventualmente) la trascrizione della voce.
+        # In una soluzione completa va impostata dal motore speech-to-text locale.
+        self.current_text = ""
+
     async def realtime_session(self):
-        """Gestisce una sessione per la comunicazione testuale usando la Realtime API."""
+        """Gestisce una sessione per la comunicazione tramite Realtime API."""
         try:
             self.transcription_signal.emit("Connessione alla Realtime API in corso...")
             
             import websocket
             import json
-            import uuid
             import threading
             
-            url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17"
+            # Modifica dell'URL: usa lo stesso modello degli esempi asincroni
+            url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
             headers = [
                 "Authorization: Bearer " + os.getenv('OPENAI_API_KEY'),
                 "OpenAI-Beta: realtime=v1",
                 "Content-Type: application/json"
             ]
             
-            # Reset
             self.connected = False
             self.websocket = None
             self.websocket_thread = None
@@ -99,28 +102,30 @@ class RealtimeTextThread(QThread):
                 self.last_event_time = time.time()
                 self.current_text = ""
                 
+                # Invia la configurazione della sessione
                 session_config = {
                     "type": "session.update",
                     "session": {
                         "modalities": ["audio", "text"],
                         "turn_detection": None,
                         "input_audio_format": "pcm16",
-                        "output_audio_format": "pcm16"  # Output esclusivamente testuale
+                        "output_audio_format": "pcm16"  # output esclusivamente testuale
                     }
                 }
                 try:
                     ws.send(json.dumps(session_config))
-                    logger.info("Configurazione sessione inviata (input audio, output solo testo)")
+                    logger.info("Configurazione sessione inviata (audio e text)")
                 except Exception as e:
-                    logger.error("Errore nell'invio della configurazione della sessione: " + str(e))
-                    
-                system_instructions = """Sei un assistente AI per interviste di lavoro, specializzato in domande per software engineer.
-                    Rispondi in modo conciso e strutturato con elenchi puntati dove appropriato.
-                    Focalizzati sugli aspetti tecnici, i principi di design, le best practice e gli algoritmi.
-                    Non essere prolisso. Fornisci esempi pratici dove utile.
-                    Le tue risposte saranno mostrate a schermo durante un'intervista, quindi sii chiaro e diretto.
-                    """
+                    logger.error("Errore invio configurazione: " + str(e))
                 
+                # Reinserisci il system prompt per istruire il modello
+                system_instructions = (
+                    "Sei un assistente AI per interviste di lavoro, specializzato in domande per software engineer.\n"
+                    "Rispondi in modo conciso e strutturato con elenchi puntati dove appropriato.\n"
+                    "Focalizzati sugli aspetti tecnici, i principi di design, le best practice e gli algoritmi.\n"
+                    "Non essere prolisso. Fornisci esempi pratici dove utile.\n"
+                    "Le tue risposte saranno mostrate a schermo durante un'intervista, quindi sii chiaro e diretto."
+                )
                 system_message = {
                     "type": "conversation.item.create",
                     "item": {
@@ -131,60 +136,67 @@ class RealtimeTextThread(QThread):
                 }
                 try:
                     ws.send(json.dumps(system_message))
-                    logger.info("Messaggio di sistema inviato")
+                    logger.info("Messaggio di system prompt inviato")
                 except Exception as e:
-                    logger.error("Errore nell'invio del messaggio di sistema: " + str(e))
-                    
+                    logger.error("Errore invio messaggio di system prompt: " + str(e))
+                
+                # Non inviamo qui un messaggio utente fisso.
+                # Richiesta di risposta
+                response_request = {
+                    "type": "response.create",
+                    "response": {"modalities": ["text"]}
+                }
+                try:
+                    ws.send(json.dumps(response_request))
+                    logger.info("Richiesta di risposta inviata")
+                except Exception as e:
+                    logger.error("Errore invio richiesta di risposta: " + str(e))
+                
                 self.transcription_signal.emit("Connesso! Pronto per l'intervista. Parla per fare domande.")
             
             def on_message(ws, message):
                 self.last_event_time = time.time()
-                
                 try:
                     event = json.loads(message)
                     event_type = event.get('type', 'sconosciuto')
-                    
                     logger.info(f"Evento ricevuto: {event_type}")
-                    logger.info(f"Dettagli evento: {str(event)[:500]}...")
                     
                     if event_type == 'response.audio.delta':
-                        logger.info("Evento audio ricevuto ma ignorato (output audio disabilitato)")
-                        
+                        logger.info("Evento audio ricevuto (output audio disabilitato)")
+                    
                     elif event_type == 'response.text.delta':
+                        # Accumula il delta, ma non aggiornare l'interfaccia finché la risposta non è completa.
                         delta = event.get('delta', '')
-                        if not hasattr(self, 'current_text'):
-                            self.current_text = ""
                         self.current_text += delta
-                        timestamp = datetime.now().strftime("%H:%M:%S")
-                        self.response_signal.emit(f"[Generazione in corso {timestamp}] {self.current_text}")
-                        
+                    
                     elif event_type == 'response.text.done':
                         if hasattr(self, 'current_text') and self.current_text.strip():
+                            # Invia la risposta completa, evitando output parziali.
                             self.response_signal.emit(self.current_text)
                             self.current_text = ""
-                            
+                    
                     elif event_type == 'response.done':
                         self.response_pending = False
                         status = event.get('response', {}).get('status', '')
                         if status == 'failed':
                             status_details = event.get('response', {}).get('status_details', {})
                             error_info = status_details.get('error', {})
-                            error_message = error_info.get('message', 'Errore sconosciuto durante la generazione della risposta')
+                            error_message = error_info.get('message', 'Errore sconosciuto')
                             logger.error(f"Errore nella risposta: {error_message}")
                             self.error_signal.emit(f"Errore API: {error_message}")
-                            
+                    
                     elif event_type == 'error':
                         self.response_pending = False
                         error = event.get('error', {})
                         error_msg = error.get('message', 'Errore sconosciuto')
                         self.error_signal.emit(f"Errore API: {error_msg}")
-                    
+                
                 except Exception as e:
-                    logger.error(f"Errore durante l'elaborazione del messaggio WebSocket: {str(e)}")
+                    logger.error("Eccezione in on_message: " + str(e))
             
             def on_error(ws, error):
-                logger.error(f"Errore WebSocket: {str(error)}")
-                self.error_signal.emit(f"Errore di connessione: {str(error)}")
+                logger.error("Errore WebSocket: " + str(error))
+                self.error_signal.emit(f"Errore di connessione: {error}")
                 self.connected = False
                 self.connection_status_signal.emit(False)
             
@@ -219,7 +231,7 @@ class RealtimeTextThread(QThread):
             self.websocket_thread.daemon = True
             self.websocket_thread.start()
             
-            # Loop principale della sessione
+            # Loop principale della sessione asincrona
             try:
                 while self.running:
                     await asyncio.sleep(1)
@@ -234,7 +246,7 @@ class RealtimeTextThread(QThread):
                 logger.info("Sessione WebSocket terminata")
                 
         except Exception as e:
-            error_msg = f"Errore critico: {str(e)}"
+            error_msg = f"Errore critico: {e}"
             self.error_signal.emit(error_msg)
             logger.error(error_msg)
         finally:
@@ -255,12 +267,12 @@ class RealtimeTextThread(QThread):
         logger.info("Richiesta di stop comunicazione ricevuta")
         self.running = False
         
-        # Se c'è una registrazione in corso la ferma
+        # Ferma la registrazione audio se attiva
         if self.recording:
             try:
                 self.stop_recording()
             except Exception as e:
-                logger.error("Errore durante lo stop_recording: " + str(e))
+                logger.error("Errore nello stop_recording: " + str(e))
         
         # Chiude il websocket se attivo
         if getattr(self, "websocket", None) and self.connected:
@@ -269,12 +281,12 @@ class RealtimeTextThread(QThread):
                 self.websocket.close()
                 logger.info("WebSocket chiuso")
             except Exception as e:
-                logger.error("Errore durante la chiusura del WebSocket: " + str(e))
+                logger.error("Errore nella chiusura del WebSocket: " + str(e))
         
         self.transcription_signal.emit(self.transcription_buffer + "\n[Terminazione sessione in corso...]")
 
     def start_recording(self):
-        """Inizia la registrazione audio dal microfono."""
+        """Avvia la registrazione audio dal microfono."""
         if self.recording:
             return
         self.recording = True
@@ -302,7 +314,6 @@ class RealtimeTextThread(QThread):
             return
         self.recording = False
         
-        # Interrompe lo stream audio
         if self.stream:
             try:
                 self.stream.stop_stream()
@@ -315,7 +326,6 @@ class RealtimeTextThread(QThread):
             except Exception as e:
                 logger.error("Errore nella terminazione di PyAudio: " + str(e))
         
-        # Invia il buffer audio se esiste e se il websocket è connesso
         if self.audio_buffer and self.connected:
             self._send_audio_buffer()
         if not (hasattr(self, 'websocket') and self.websocket and self.connected):
@@ -323,9 +333,27 @@ class RealtimeTextThread(QThread):
             return
         
         try:
+            # Qui inviamo il commit finale dell'audio
             commit_message = {"type": "input_audio_buffer.commit"}
             self.websocket.send(json.dumps(commit_message))
             logger.info("Audio input terminato (commit finale)")
+            
+            # Dopo il commit, inviamo un nuovo messaggio utente basato sulla trascrizione
+            # ATTENZIONE: Qui utilizziamo self.current_text come segnaposto per il testo trascritto.
+            # In una soluzione completa, integra un modulo di speech-to-text per ottenere la trascrizione effettiva.
+            if self.current_text.strip():
+                user_message = {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": self.current_text}]
+                    }
+                }
+                self.websocket.send(json.dumps(user_message))
+                logger.info("Messaggio utente inviato dal commit vocale")
+                # È buona norma resettare la variabile dopo l'invio
+                self.current_text = ""
             
             if not self.response_pending:
                 response_request = {
@@ -403,11 +431,9 @@ class RealtimeTextThread(QThread):
         if not self.connected or self.response_pending:
             return
         try:
-            # Salva una copia dello storico prima di svuotare il buffer
             if not hasattr(self, 'audio_history'):
                 self.audio_history = []
             if self.audio_buffer:
-                # Salva il pezzo inviato nello storico
                 self.audio_history.append(b''.join(self.audio_buffer))
                 self._send_audio_buffer()
                 self.audio_buffer = []
@@ -480,14 +506,16 @@ class IntervistaAssistant(QMainWindow):
         self.transcription_text.setFont(QFont("Arial", 11))
         self.transcription_text.setMinimumHeight(150)
         
-        self.speak_button = QPushButton("Parla")
-        self.speak_button.setFont(QFont("Arial", 11))
-        self.speak_button.clicked.connect(self.toggle_speaking)
-        self.speak_button.setEnabled(False)
+        # Tasto "Parla" rimosso perché l'app inizierà ad ascoltare subito dopo il "Inizia Sessione".
+        # self.speak_button = QPushButton("Parla")
+        # self.speak_button.setFont(QFont("Arial", 11))
+        # self.speak_button.clicked.connect(self.toggle_speaking)
+        # self.speak_button.setEnabled(False)
         
         input_layout.addWidget(input_label)
         input_layout.addWidget(self.transcription_text)
-        input_layout.addWidget(self.speak_button)
+        # Il tasto "Parla" non viene più aggiunto all'interfaccia.
+        # input_layout.addWidget(self.speak_button)
         
         response_container = QWidget()
         response_layout = QVBoxLayout(response_container)
@@ -540,7 +568,7 @@ class IntervistaAssistant(QMainWindow):
         self.setCentralWidget(central_widget)
         
     def toggle_recording(self):
-        """Attiva o disattiva la connessione al modello."""
+        """Attiva o disattiva la connessione al modello e inizia immediatamente la registrazione."""
         if not self.recording:
             self.recording = True
             self.record_button.setText("Termina Sessione")
@@ -554,7 +582,10 @@ class IntervistaAssistant(QMainWindow):
             self.text_thread.finished.connect(self.recording_finished)
             self.text_thread.start()
             
-            self.speak_button.setEnabled(True)
+            # Avvio automatico della registrazione subito dopo inizializzazione della sessione
+            while not self.text_thread.connected:
+                time.sleep(0.1)
+            self.text_thread.start_recording()
         else:
             if self.shutdown_in_progress:
                 return
@@ -567,10 +598,7 @@ class IntervistaAssistant(QMainWindow):
                 try:
                     self.text_thread.stop_recording()
                 except Exception as e:
-                    logger.error("Errore durante l'arresto della registrazione: " + str(e))
-                self.speak_button.setText("Parla")
-                self.speak_button.setStyleSheet("")
-                self.speak_button.setEnabled(False)
+                    logger.error("Errore durante lo stop_recording: " + str(e))
             
             try:
                 if self.text_thread:
@@ -598,7 +626,7 @@ class IntervistaAssistant(QMainWindow):
                 self.record_button.setStyleSheet("background-color: #ff5555;")
     
     def update_transcription(self, text):
-        """Aggiorna il testo della trascrizione."""
+        """Aggiorna il campo della trascrizione."""
         if text == "Registrazione in corso...":
             self.transcription_text.setText(text)
             return
@@ -622,7 +650,7 @@ class IntervistaAssistant(QMainWindow):
                 self.chat_history.append({"role": "user", "content": text})
     
     def update_response(self, text):
-        """Aggiorna il testo della risposta."""
+        """Aggiorna il campo della risposta."""
         if not text:
             return
         current_time = datetime.now().strftime("%H:%M:%S")
@@ -657,7 +685,7 @@ class IntervistaAssistant(QMainWindow):
             logger.error(error_msg)
     
     def share_screenshot(self):
-        """Cattura uno screenshot e mostra opzioni per condividerlo."""
+        """Cattura uno screenshot e offre opzioni per condividerlo."""
         try:
             self.showMinimized()
             time.sleep(0.5)
@@ -712,7 +740,7 @@ class IntervistaAssistant(QMainWindow):
         QMessageBox.critical(self, "Errore", message)
         
     def closeEvent(self, event):
-        """Gestisce l'evento di chiusura dell'applicazione."""
+        """Gestisce la chiusura dell'applicazione."""
         if self.recording and self.text_thread:
             self.transcription_text.append("\n[Chiusura dell'applicazione in corso...]")
             try:
@@ -723,21 +751,17 @@ class IntervistaAssistant(QMainWindow):
         event.accept()
 
     def toggle_speaking(self):
-        """Attiva o disattiva la registrazione della voce."""
+        """Attiva o disattiva la registrazione vocale."""
         if not self.recording or not self.text_thread or not self.text_thread.connected:
             self.show_error("Non sei connesso. Inizia prima una sessione.")
             return
         if not hasattr(self.text_thread, 'recording') or not self.text_thread.recording:
-            self.speak_button.setText("Stop")
-            self.speak_button.setStyleSheet("background-color: #ff5555;")
             self.text_thread.start_recording()
         else:
-            self.speak_button.setText("Parla")
-            self.speak_button.setStyleSheet("")
             self.text_thread.stop_recording()
 
     def stop_recording(self):
-        """Metodo mantenuto per compatibilità (la chiusura viene gestita in toggle_recording)."""
+        """Metodo preservato per compatibilità (la gestione della stop avviene in toggle_recording)."""
         logger.info("IntervistaAssistant: Fermando la registrazione")
         pass
 
