@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
 import sys
 import os
-import pyperclip
-import tempfile
 import time
 import json
 import logging
 import asyncio
 from datetime import datetime
-from pathlib import Path
-import base64
 
-import pyautogui
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout, 
                             QHBoxLayout, QWidget, QTextEdit, QLabel, QSplitter,
-                            QMessageBox, QFileDialog, QCheckBox)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize
-from PyQt5.QtGui import QFont, QPixmap, QIcon
+                            QMessageBox, QFileDialog)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QFont
 
-from openai import OpenAI, AsyncOpenAI
+from openai import OpenAI
 from dotenv import load_dotenv
 
 from .utils import ScreenshotManager
+
+import pyaudio
+import threading
+import base64
+import numpy as np
+
 
 # Configurazione logging
 logging.basicConfig(level=logging.INFO, 
@@ -32,529 +33,440 @@ logger = logging.getLogger(__name__)
 # Carica variabili d'ambiente
 load_dotenv()
 
-class RealtimeAudioThread(QThread):
-    """Thread per catturare audio e trascriverlo usando OpenAI Realtime API."""
+class RealtimeTextThread(QThread):
+    """Thread per comunicazione testuale usando OpenAI Realtime API."""
     transcription_signal = pyqtSignal(str)
     response_signal = pyqtSignal(str)
     error_signal = pyqtSignal(str)
-    connection_status_signal = pyqtSignal(bool)  # Nuovo segnale per lo stato della connessione
+    connection_status_signal = pyqtSignal(bool)
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.running = False
-        self.connected = False  # Flag per tracciare lo stato della connessione
-        self.temp_dir = Path(tempfile.gettempdir()) / "intervista_assistant"
-        self.temp_dir.mkdir(exist_ok=True)
+        self.connected = False
         self.transcription_buffer = ""
-        self.connection_timeout = 15  # Timeout di connessione in secondi
-        self.last_event_time = None  # Per tracciare quando è stato ricevuto l'ultimo evento
-        self.reconnect_attempts = 0  # Contatore tentativi di riconnessione
-        self.max_reconnect_attempts = 3  # Numero massimo di tentativi di riconnessione
+        self.last_event_time = None
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = 3
+        
+        # Configurazione audio
+        self.recording = False
+        self.audio_buffer = []
+        self.CHUNK = 1024
+        self.FORMAT = pyaudio.paInt16
+        self.CHANNELS = 1
+        self.RATE = 16000
+        self.p = None
+        self.stream = None
+        
+        # Configurazione per il rilevamento delle pause
+        self.last_audio_commit_time = 0
+        self.silence_threshold = 500  # Valore RMS per definire il silenzio
+        self.pause_duration = 0.7  # Secondi di pausa che attivano un commit (ridotto per maggiore reattività)
+        self.min_commit_interval = 1.5  # Intervallo minimo in secondi tra commit consecutivi (ridotto)
+        self.is_speaking = False
+        self.silence_start_time = 0
+        self.last_commit_time = 0
+        self.response_pending = False
+        self.buffer_size_to_send = 40  # Aumentato: invio meno frequente (circa 2.5 secondi di audio)
         
     async def realtime_session(self):
-        """Gestisce una sessione per la registrazione e trascrizione audio usando la Realtime API."""
-        # Inizializza PyAudio all'inizio per evitare di ricrearlo in caso di riconnessione
-        import pyaudio
-        import wave
-        
-        # Configurazione per la registrazione
-        CHUNK = 1024
-        FORMAT = pyaudio.paInt16
-        CHANNELS = 1
-        RATE = 16000  # 16kHz come raccomandato nella documentazione
-        RECORD_SECONDS = 0.5  # Piccoli chunk per lo streaming continuo
-        
-        # Crea oggetto PyAudio
-        p = pyaudio.PyAudio()
-        
-        # Apri stream
-        stream = None
-        
+        """Gestisce una sessione per la comunicazione testuale usando la Realtime API."""
         try:
-            stream = p.open(format=FORMAT,
-                            channels=CHANNELS,
-                            rate=RATE,
-                            input=True,
-                            frames_per_buffer=CHUNK)
-            
-            # Notifica all'utente che stiamo iniziando la registrazione
+            # Notifica all'utente che stiamo iniziando la connessione
             self.transcription_signal.emit("Connessione alla Realtime API in corso...")
             
-            # Loop per riconnessione
-            while self.running and self.reconnect_attempts <= self.max_reconnect_attempts:
+            # Usa websocket-client
+            import websocket
+            import json
+            import uuid
+            import threading
+            
+            # URL e header per la connessione
+            url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17"
+            headers = [
+                "Authorization: Bearer " + os.getenv('OPENAI_API_KEY'),
+                "OpenAI-Beta: realtime=v1",
+                "Content-Type: application/json"
+            ]
+            
+            # Imposta il flag di connessione
+            self.connected = False
+            self.websocket = None
+            self.websocket_thread = None
+            
+            # Funzioni di callback per websocket-client
+            def on_open(ws):
+                logger.info("Connessione WebSocket stabilita")
+                self.connected = True
+                self.connection_status_signal.emit(True)
+                self.last_event_time = time.time()
+                self.current_text = ""
+                
+                # Configura la sessione per input audio e output solo testuale
+                session_config = {
+                    "type": "session.update",
+                    "session": {
+                        "modalities": ["audio", "text"],
+                        "turn_detection": None,
+                        "input_audio_format": "pcm16",  # Per l'input audio
+                        "output_audio_format": "pcm16"  # Formato audio richiesto anche se usiamo solo testo
+                    }
+                }
+                ws.send(json.dumps(session_config))
+                logger.info("Configurazione sessione inviata (input audio, output solo testo)")
+                
+                # Invia il messaggio di sistema
+                system_instructions = """Sei un assistente AI per interviste di lavoro, specializzato in domande per software engineer.
+                    Rispondi in modo conciso e strutturato con elenchi puntati dove appropriato.
+                    Focalizzati sugli aspetti tecnici, i principi di design, le best practice e gli algoritmi.
+                    Non essere prolisso. Fornisci esempi pratici dove utile.
+                    Le tue risposte saranno mostrate a schermo durante un'intervista, quindi sii chiaro e diretto..
+                    """
+                
+                system_message = {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "message",
+                        "role": "system",
+                        "content": [{"type": "input_text", "text": system_instructions}]
+                    }
+                }
+                ws.send(json.dumps(system_message))
+                logger.info("Messaggio di sistema inviato")
+                
+                # Notifica all'utente che la connessione è stabilita
+                self.transcription_signal.emit("Connesso! Pronto per l'intervista. Parla per fare domande.")
+            
+            def on_message(ws, message):
+                self.last_event_time = time.time()
+                
                 try:
-                    # Inizializza il client OpenAI
-                    client = AsyncOpenAI()
-                    events_task = None
-                    monitor_task = None
+                    event = json.loads(message)
+                    event_type = event.get('type', 'sconosciuto')
                     
-                    try:
-                        # Ora connect() restituisce direttamente l'oggetto ConnectionManager
-                        logger.info("Tentativo di connessione alla Realtime API...")
-                        connection = client.beta.realtime.connect(model="gpt-4o-realtime-preview")
+                    logger.info(f"Evento ricevuto: {event_type}")
+                    logger.info(f"Dettagli evento: {str(event)[:500]}...")
+                    
+                    if event_type == 'response.audio.delta':
+                        # Ignoriamo completamente i chunk audio in quanto abbiamo disabilitato l'output audio
+                        # Questo evento non dovrebbe essere ricevuto con la configurazione corrente
+                        logger.info("Evento audio ricevuto ma ignorato (output audio disabilitato)")
                         
-                        if not connection or not hasattr(connection, "session"):
-                            raise Exception("Connessione non valida - oggetto session non disponibile")
+                    elif event_type == 'response.text.delta':
+                        delta = event.get('delta', '')
+                        if not hasattr(self, 'current_text'):
+                            self.current_text = ""
+                        self.current_text += delta
                         
-                        logger.info("Connessione iniziale stabilita, configurazione in corso...")
-                        self.connected = True
-                        self.connection_status_signal.emit(True)
-                        logger.info("Connessione stabilita con la Realtime API")
+                        timestamp = datetime.now().strftime("%H:%M:%S")
+                        self.response_signal.emit(f"[Generazione in corso {timestamp}] {self.current_text}")
                         
-                        # Resetta il contatore dei tentativi di riconnessione
-                        self.reconnect_attempts = 0
+                    elif event_type == 'response.text.done':
+                        if hasattr(self, 'current_text') and self.current_text.strip():
+                            self.response_signal.emit(self.current_text)
+                            self.current_text = ""
+                            
+                    elif event_type == 'response.done':
+                        # Risposta completata, reset della flag
+                        self.response_pending = False
                         
-                        # Configurazione specifica della sessione - semplificata secondo documentazione
-                        await connection.session.update(session={
-                            'modalities': ['text'],  # Solo modalità testo
-                            'turn_detection': {  # Mantenuto per il rilevamento del parlato
-                                'type': 'server_vad',
-                                'threshold': 0.5,
-                                'silence_duration_ms': 300
-                            }
-                        })
-                        logger.info("Sessione configurata in modalità solo testo")
-                        
-                        # Impostiamo un timeout per la connessione
-                        connection_established = False
-                        start_time = time.time()
-                        
-                        # Verifichiamo che la connessione sia attiva
-                        while not connection_established and (time.time() - start_time) < self.connection_timeout:
-                            if hasattr(connection, "session") and connection.session:
-                                connection_established = True
-                                break
-                            await asyncio.sleep(0.5)
-                        
-                        if not connection_established:
-                            raise asyncio.TimeoutError("Timeout durante la connessione alla Realtime API")
-                        
-                        # Imposta un messaggio di sistema per specificare il comportamento dell'assistente
-                        system_instructions = """Sei un assistente AI per interviste di lavoro, specializzato in domande per software engineer.
-                            Rispondi in modo conciso e strutturato con elenchi puntati dove appropriato.
-                            Focalizzati sugli aspetti tecnici, i principi di design, le best practice e gli algoritmi.
-                            Non essere prolisso. Fornisci esempi pratici dove utile.
-                            Le tue risposte saranno mostrate a schermo durante un'intervista, quindi sii chiaro e diretto.
-                            Stai ascoltando un'intervista tecnica. Quando rilevi una domanda tecnica, rispondi con informazioni utili.
-                            """
-                        
-                        await connection.conversation.item.create(
-                            item={
-                                "type": "message",
-                                "role": "system",
-                                "content": [{"type": "input_text", "text": system_instructions}],
-                            }
-                        )
-                        logger.info("Messaggio di sistema inviato")
-                        
-                        # Notifica all'utente che la connessione è stabilita
-                        self.transcription_signal.emit("Connesso! Registrazione in corso...\nIn attesa del tuo parlato per iniziare.")
-                        
-                        # Crea un task per gestire gli eventi in arrivo
-                        events_task = asyncio.create_task(self.process_events(connection))
-                        logger.info("Task di gestione eventi avviato")
-                        
-                        # Impostare il timestamp iniziale dell'ultimo evento
-                        self.last_event_time = time.time()
-                        
-                        # Task per monitorare se riceviamo eventi dal server
-                        monitor_task = asyncio.create_task(self.monitor_connection_activity())
-                        
-                        # Contatore per il debug
-                        audio_chunks_sent = 0
-                        
-                        # Loop di registrazione e invio audio
-                        while self.running and self.connected:
-                            try:
-                                # Registra audio per RECORD_SECONDS
-                                frames = []
-                                for _ in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
-                                    if not self.running or not self.connected:
-                                        break
-                                    data = stream.read(CHUNK, exception_on_overflow=False)
-                                    frames.append(data)
-                                
-                                if not frames or not self.running or not self.connected:
-                                    continue
-                                    
-                                # Salva l'audio in un file temporaneo
-                                temp_file = self.temp_dir / f"audio_{time.time()}.wav"
-                                wf = wave.open(str(temp_file), 'wb')
-                                wf.setnchannels(CHANNELS)
-                                wf.setsampwidth(p.get_sample_size(FORMAT))
-                                wf.setframerate(RATE)
-                                wf.writeframes(b''.join(frames))
-                                wf.close()
-                                
-                                # Leggi il file audio e invialo alla Realtime API
-                                with open(temp_file, "rb") as f:
-                                    audio_data = f.read()
-                                    # Converti i dati audio in base64 prima di inviarli
-                                    audio_base64 = base64.b64encode(audio_data).decode('utf-8')
-                                
-                                # Crea un ID univoco per l'evento per il tracciamento degli errori
-                                event_id = f"audio_{int(time.time()*1000)}"
-                                
-                                if not self.running or not self.connected:
-                                    break
-                                
-                                # Prova a inviare l'audio
-                                try:
-                                    await connection.input_audio_buffer.append(
-                                        audio=audio_base64,
-                                        event_id=event_id
-                                    )
-                                    logger.info(f"Audio appeso al buffer con event_id: {event_id}")
-                                except Exception as audio_error:
-                                    # Se fallisce, prova con il metodo alternativo o gestisci l'errore
-                                    logger.warning(f"Fallito append al buffer audio: {str(audio_error)}")
-                                    if "Connection closed" in str(audio_error):
-                                        # La connessione è stata chiusa
-                                        logger.error("Connessione chiusa dal server")
-                                        self.connected = False
-                                        break
-                                    
-                                    try:
-                                        # Metodo alternativo
-                                        await connection.conversation.item.create(
-                                            item={
-                                                "type": "message",
-                                                "role": "user",
-                                                "content": [
-                                                    {
-                                                        "type": "input_audio",
-                                                        "audio": audio_base64
-                                                    }
-                                                ],
-                                            },
-                                            event_id=event_id
-                                        )
-                                        logger.info(f"Audio inviato via item.create con event_id: {event_id}")
-                                    except Exception as alt_error:
-                                        logger.error(f"Fallito anche metodo alternativo: {str(alt_error)}")
-                                        if "Connection closed" in str(alt_error):
-                                            self.connected = False
-                                            break
-                                
-                                # Incrementa contatore e log periodico
-                                audio_chunks_sent += 1
-                                if audio_chunks_sent % 10 == 0:
-                                    logger.info(f"Stato: inviati {audio_chunks_sent} chunk audio finora, in attesa di risposta...")
-                                
-                                # Elimina il file temporaneo
-                                if temp_file.exists():
-                                    temp_file.unlink()
-                                    
-                            except Exception as e:
-                                error_msg = f"Errore durante l'invio audio: {str(e)}"
-                                logger.error(error_msg)
-                                # Verifica se c'è un errore di connessione
-                                if "Connection" in str(e) or "socket" in str(e).lower():
-                                    self.connected = False
-                                    break
-                        
-                        # Se siamo usciti dal loop ma l'app è ancora in esecuzione, 
-                        # potrebbe essere necessario riconnettersi
-                        if self.running and not self.connected:
-                            await self.handle_reconnection()
-                        
-                    except Exception as session_err:
-                        error_msg = f"Errore durante la sessione: {str(session_err)}"
-                        logger.error(error_msg)
-                        self.error_signal.emit(error_msg)
-                        self.connected = False
-                        await self.handle_reconnection()
-                    finally:
-                        # Cancella i task attivi
-                        if events_task and not events_task.done():
-                            events_task.cancel()
-                            try:
-                                await events_task
-                            except asyncio.CancelledError:
-                                pass
-                        
-                        if monitor_task and not monitor_task.done():
-                            monitor_task.cancel()
-                            try:
-                                await monitor_task
-                            except asyncio.CancelledError:
-                                pass
-                
+                        # Controlla se la risposta ha avuto successo
+                        status = event.get('response', {}).get('status', '')
+                        if status == 'failed':
+                            status_details = event.get('response', {}).get('status_details', {})
+                            error_info = status_details.get('error', {})
+                            error_message = error_info.get('message', 'Errore sconosciuto durante la generazione della risposta')
+                            logger.error(f"Errore nella risposta: {error_message}")
+                            self.error_signal.emit(f"Errore API: {error_message}")
+                            
+                    elif event_type == 'error':
+                        self.response_pending = False
+                        error = event.get('error', {})
+                        error_msg = error.get('message', 'Errore sconosciuto')
+                        self.error_signal.emit(f"Errore API: {error_msg}")
+                    
                 except Exception as e:
-                    error_msg = f"Errore generale: {str(e)}"
-                    logger.error(error_msg)
-                    self.error_signal.emit(error_msg)
-                    await self.handle_reconnection()
+                    logger.error(f"Errore durante l'elaborazione del messaggio WebSocket: {str(e)}")
+            
+            def on_error(ws, error):
+                logger.error(f"Errore WebSocket: {str(error)}")
+                self.error_signal.emit(f"Errore di connessione: {str(error)}")
+                self.connected = False
+                self.connection_status_signal.emit(False)
+            
+            def on_close(ws, close_status_code, close_msg):
+                logger.info(f"Connessione WebSocket chiusa: {close_status_code} - {close_msg}")
+                self.connected = False
+                self.connection_status_signal.emit(False)
                 
-                # Se non stiamo più eseguendo, esci dal loop di riconnessione
-                if not self.running:
-                    break
+                self.reconnect_attempts += 1
+                reconnect_msg = f"\n[Connessione persa. Tentativo di riconnessione {self.reconnect_attempts}/{self.max_reconnect_attempts}]"
+                self.transcription_buffer += reconnect_msg
+                self.transcription_signal.emit(self.transcription_buffer)
                 
-                # Se abbiamo esaurito i tentativi di riconnessione
-                if self.reconnect_attempts > self.max_reconnect_attempts and self.running:
-                    self.error_signal.emit(f"Dopo {self.max_reconnect_attempts} tentativi, non è stato possibile stabilire una connessione stabile. Prova a riavviare l'applicazione.")
-                    self.running = False
+                if self.running and self.reconnect_attempts <= self.max_reconnect_attempts:
+                    self.error_signal.emit("Riconnessione necessaria")
+            
+            # Crea WebSocketApp con le callback
+            self.websocket = websocket.WebSocketApp(
+                url,
+                header=headers,
+                on_open=on_open,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close
+            )
+            
+            # Resetta il contatore dei tentativi di riconnessione
+            self.reconnect_attempts = 0
+            
+            # Avvia il WebSocket in un thread separato
+            def run_websocket():
+                self.websocket.run_forever()
+            
+            self.websocket_thread = threading.Thread(target=run_websocket)
+            self.websocket_thread.daemon = True
+            self.websocket_thread.start()
+            
+            # Loop principale
+            try:
+                while self.running:
+                    await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                logger.info("Loop principale cancellato")
+            finally:
+                if self.websocket and self.connected:
+                    self.websocket.close()
+                
+                logger.info("Sessione WebSocket terminata")
                 
         except Exception as e:
             error_msg = f"Errore critico: {str(e)}"
             self.error_signal.emit(error_msg)
             logger.error(error_msg)
-            self.running = False
         finally:
-            # Chiudi e termina lo stream e PyAudio
-            if stream:
-                stream.stop_stream()
-                stream.close()
-            p.terminate()
             self.connected = False
             self.connection_status_signal.emit(False)
     
-    async def handle_reconnection(self):
-        """Gestisce la logica di riconnessione."""
-        self.connected = False
-        self.connection_status_signal.emit(False)
-        self.reconnect_attempts += 1
-        
-        if self.reconnect_attempts <= self.max_reconnect_attempts:
-            wait_time = min(5 * self.reconnect_attempts, 15)  # Backoff esponenziale ma limitato a 15 secondi
-            reconnect_msg = f"\n[Connessione persa. Tentativo di riconnessione {self.reconnect_attempts}/{self.max_reconnect_attempts} tra {wait_time} secondi...]"
-            self.transcription_buffer += reconnect_msg
-            self.transcription_signal.emit(self.transcription_buffer)
-            logger.info(f"Tentativo di riconnessione {self.reconnect_attempts}/{self.max_reconnect_attempts} tra {wait_time} secondi")
-            
-            # Pausa prima di riconnettersi
-            await asyncio.sleep(wait_time)
-        else:
-            logger.error(f"Esauriti i tentativi di riconnessione ({self.max_reconnect_attempts})")
-            self.transcription_buffer += f"\n[Esauriti i tentativi di riconnessione. Per favore riavvia la registrazione.]"
-            self.transcription_signal.emit(self.transcription_buffer)
-    
-    async def monitor_connection_activity(self):
-        """Monitora la connessione e verifica se stiamo ricevendo eventi."""
-        no_activity_timeout = 20  # Secondi senza attività prima di considerare la connessione persa
-        check_interval = 5  # Controlla ogni 5 secondi
-        
-        while self.running:
-            await asyncio.sleep(check_interval)
-            
-            if self.last_event_time is not None:
-                time_since_last_event = time.time() - self.last_event_time
-                
-                if time_since_last_event > no_activity_timeout:
-                    logger.warning(f"Nessun evento ricevuto negli ultimi {time_since_last_event:.1f} secondi")
-                    self.transcription_buffer += f"\n[ATTENZIONE: Nessuna risposta dal server negli ultimi {int(time_since_last_event)} secondi]"
-                    self.transcription_signal.emit(self.transcription_buffer)
-                    
-                    if time_since_last_event > no_activity_timeout * 2:
-                        logger.error("Connessione probabilmente persa. Invio errore.")
-                        self.error_signal.emit("Connessione persa con il server. Si consiglia di fermare e riavviare la registrazione.")
-                        break  # Esci dal loop, ma lascia che il thread continui fino a quando l'utente non preme stop
-    
-    async def process_events(self, connection):
-        """Processa gli eventi in arrivo dalla Realtime API."""
-        try:
-            current_text = ""
-            events_received = 0  # Contatore per debug
-            
-            # Imposta il timestamp per la prima risposta
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            self.transcription_buffer += f"\n[Sessione avviata alle {timestamp}]"
-            self.transcription_signal.emit(self.transcription_buffer)
-            
-            # Log che iniziamo ad ascoltare gli eventi
-            logger.info("Iniziando ad ascoltare gli eventi dalla Realtime API...")
-            
-            # Il messaggio di test iniziale verrà inviato come conversazione
-            first_message_event_id = f"text_test_{int(time.time()*1000)}"
-            try:
-                # 1. Prima creiamo l'elemento di conversazione (messaggio utente)
-                await connection.conversation.item.create(
-                    item={
-                        "type": "message",
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": "Ciao, puoi sentirmi? Questo è un test. Rispondi solo con testo per favore."}],
-                    },
-                    event_id=first_message_event_id
-                )
-                logger.info(f"Messaggio di test inviato con event_id: {first_message_event_id}")
-                
-                # 2. Poi richiediamo una risposta testuale
-                await connection.response.create(
-                    response={
-                        "modalities": ["text"],  # Solo testo, come nella documentazione
-                    }
-                )
-                logger.info("Richiesta risposta testuale inviata correttamente")
-                
-            except Exception as resp_err:
-                logger.error(f"Errore durante la sequenza iniziale: {str(resp_err)}")
-            
-            # Aggiorna il timestamp dell'ultimo evento dopo aver inviato la richiesta
-            self.last_event_time = time.time()
-            
-            async for event in connection:
-                try:
-                    # Aggiorna il timestamp dell'ultimo evento ricevuto
-                    self.last_event_time = time.time()
-                    
-                    # Incrementa contatore e log
-                    events_received += 1
-                    event_type = getattr(event, 'type', 'sconosciuto')
-                    
-                    # Log più dettagliato dell'evento
-                    logger.info(f"Evento #{events_received} ricevuto: {event_type}")
-                    # DEBUG: Stampa il contenuto completo dell'evento per analisi
-                    if hasattr(event, '__dict__'):
-                        logger.info(f"Dettagli evento: {str(event.__dict__)}")
-                    
-                    # Gestione eventi di sessione
-                    if event_type == 'session.created' or event_type == 'session.updated':
-                        logger.info(f"Evento di sessione ricevuto: {event_type}")
-                        session_info = getattr(event, 'session', None)
-                        if session_info:
-                            logger.info(f"ID sessione: {getattr(session_info, 'id', 'sconosciuto')}")
-                            # DEBUG: Stampa configurazione sessione completa
-                            if hasattr(session_info, '__dict__'):
-                                logger.info(f"Configurazione sessione: {str(session_info.__dict__)}")
-                    
-                    # Gestione eventi di conversazione
-                    elif event_type == 'conversation.created' or event_type == 'conversation.updated':
-                        logger.info(f"Evento di conversazione ricevuto: {event_type}")
-                    
-                    # Gestione eventi di input audio
-                    elif event_type == 'input_audio_buffer.speech_started':
-                        # Notifica l'utente che l'API ha rilevato il parlato
-                        speech_msg = f"\n[Parlato rilevato alle {datetime.now().strftime('%H:%M:%S')}]"
-                        self.transcription_buffer += speech_msg
-                        self.transcription_signal.emit(self.transcription_buffer)
-                        logger.info("Parlato rilevato dalla Realtime API")
-                    
-                    elif event_type == 'input_audio_buffer.speech_stopped':
-                        # Notifica l'utente che l'API ha smesso di rilevare il parlato
-                        speech_msg = f"\n[Fine parlato alle {datetime.now().strftime('%H:%M:%S')}]"
-                        self.transcription_buffer += speech_msg
-                        self.transcription_signal.emit(self.transcription_buffer)
-                        logger.info("Fine parlato rilevato dalla Realtime API")
-                    
-                    # Gestione eventi di risposta
-                    elif event_type == 'response.created':
-                        logger.info("Risposta creata dal server")
-                        self.transcription_buffer += f"\n[Risposta in generazione...]"
-                        self.transcription_signal.emit(self.transcription_buffer)
-                    
-                    elif event_type == 'response.text.delta':
-                        # Accumula il testo per mostrarlo in blocchi più grandi
-                        delta = getattr(event, 'delta', '')
-                        current_text += delta
-                        logger.info(f"Delta di testo ricevuto: '{delta}'")
-                        
-                        # Aggiorna anche la risposta per mostrare il testo mentre viene generato
-                        timestamp = datetime.now().strftime("%H:%M:%S")
-                        self.response_signal.emit(f"[Generazione in corso {timestamp}] {current_text}")
-                    
-                    elif event_type == 'response.text.done':
-                        # Invia il testo completo quando è finito
-                        logger.info(f"Testo completo ricevuto: '{current_text}'")
-                        if current_text.strip():
-                            self.response_signal.emit(current_text)
-                            current_text = ""  # Resetta per la prossima risposta
-                    
-                    elif event_type == 'response.done':
-                        logger.info("Risposta completa ricevuta")
-                        # Indica che la risposta è stata completata
-                        self.transcription_buffer += f"\n[Risposta completata alle {datetime.now().strftime('%H:%M:%S')}]"
-                        self.transcription_signal.emit(self.transcription_buffer)
-                    
-                    # Gestione eventi di elemento creato nella conversazione
-                    elif event_type == 'conversation.item.created' or event_type == 'conversation.item.text.created':
-                        # Questo evento contiene la trascrizione dell'audio
-                        text_content = None
-                        
-                        # Estrai il testo in base al tipo di evento
-                        if event_type == 'conversation.item.text.created':
-                            text_content = getattr(event, 'text', None)
-                        elif event_type == 'conversation.item.created':
-                            item = getattr(event, 'item', None)
-                            if item and hasattr(item, 'content'):
-                                for content_part in item.content:
-                                    if hasattr(content_part, 'text') and content_part.text:
-                                        text_content = content_part.text
-                                        break
-                        
-                        logger.info(f"Trascrizione ricevuta: '{text_content}'")
-                        
-                        if text_content:
-                            # Aggiorna la trascrizione
-                            timestamp = datetime.now().strftime("%H:%M:%S")
-                            self.transcription_buffer += f"\n[{timestamp}] {text_content}"
-                            self.transcription_signal.emit(self.transcription_buffer)
-                            
-                            # Dopo aver ricevuto la trascrizione, chiediamo una risposta
-                            # seguendo il formato della documentazione
-                            try:
-                                logger.info("Trascrizione ricevuta, inviando richiesta di risposta testuale...")
-                                # Richiedi una risposta testuale usando il formato documentato
-                                await connection.response.create(
-                                    response={
-                                        "modalities": ["text"]
-                                    }
-                                )
-                                logger.info("Richiesta risposta testuale inviata dopo trascrizione")
-                            except Exception as post_transcription_err:
-                                logger.error(f"Errore durante la richiesta di risposta post-trascrizione: {str(post_transcription_err)}")
-                    
-                    # Gestione errori
-                    elif event_type == 'error':
-                        # Gestisci gli errori con più dettagli
-                        error_msg = f"Errore Realtime API: {getattr(event.error, 'message', 'Errore sconosciuto')}"
-                        error_type = getattr(event.error, 'type', 'sconosciuto')
-                        error_code = getattr(event.error, 'code', 'sconosciuto')
-                        error_details = f" (Tipo: {error_type}, Codice: {error_code})"
-                        
-                        event_id = getattr(event, 'event_id', None)
-                        if event_id:
-                            error_details += f", Event ID: {event_id}"
-                        
-                        logger.error(f"{error_msg}{error_details}")
-                        self.error_signal.emit(f"{error_msg}\n{error_details}")
-                        
-                        # Aggiorna anche la trascrizione per mostrare l'errore all'utente
-                        self.transcription_buffer += f"\n[ERRORE: {getattr(event.error, 'message', 'Errore sconosciuto')}]"
-                        self.transcription_signal.emit(self.transcription_buffer)
-                    
-                    else:
-                        # Log per eventi non gestiti
-                        logger.info(f"Evento non gestito di tipo: {event_type}")
-                        if hasattr(event, '__dict__'):
-                            logger.info(f"Contenuto evento: {str(event.__dict__)[:500]}...")
-                
-                except Exception as e:
-                    logger.error(f"Errore durante la gestione dell'evento: {str(e)}")
-            
-            # Log se il loop degli eventi termina
-            logger.warning("Il loop di ascolto degli eventi è terminato inaspettatamente")
-            self.transcription_buffer += "\n[ATTENZIONE: La connessione agli eventi è terminata]"
-            self.transcription_signal.emit(self.transcription_buffer)
-        
-        except Exception as e:
-            logger.error(f"Errore nel loop di eventi: {str(e)}")
-            self.error_signal.emit(f"Errore nel loop di eventi: {str(e)}")
-            # Aggiorna la trascrizione con l'errore
-            self.transcription_buffer += f"\n[ERRORE CRITICO: {str(e)}]"
-            self.transcription_signal.emit(self.transcription_buffer)
-    
     def run(self):
-        """Avvia il loop asincrono per la sessione audio."""
+        """Avvia il loop asincrono per la sessione."""
         self.running = True
         asyncio.run(self.realtime_session())
-        logger.info("Thread di registrazione terminato")
+        logger.info("Thread di comunicazione terminato")
             
     def stop(self):
-        """Ferma la registrazione."""
-        logger.info("Richiesta di stop registrazione ricevuta")
+        """Ferma la comunicazione."""
+        logger.info("Richiesta di stop comunicazione ricevuta")
         self.running = False
-        # Notifica all'utente che stiamo fermando la registrazione
-        self.transcription_signal.emit(self.transcription_buffer + "\n[Fermando la registrazione...]")
+        
+        # Se la registrazione è attiva, fermala
+        if self.recording:
+            self.stop_recording()
+        
+        # Chiudi esplicitamente il WebSocket se esiste e ancora connesso
+        if hasattr(self, 'websocket') and self.websocket and self.connected:
+            try:
+                logger.info("Chiusura WebSocket in corso...")
+                self.websocket.close()
+                logger.info("WebSocket chiuso")
+            except Exception as e:
+                logger.error(f"Errore durante la chiusura del WebSocket: {str(e)}")
+        
+        self.transcription_signal.emit(self.transcription_buffer + "\n[Terminazione sessione in corso...]")
+
+    def start_recording(self):
+        """Inizia la registrazione audio dal microfono."""
+        if self.recording:
+            return
+        
+        self.recording = True
+        self.audio_buffer = []
+        
+        # Inizializza PyAudio
+        self.p = pyaudio.PyAudio()
+        self.stream = self.p.open(format=self.FORMAT,
+                                 channels=self.CHANNELS,
+                                 rate=self.RATE,
+                                 input=True,
+                                 frames_per_buffer=self.CHUNK)
+        
+        # Avvia un thread per la registrazione
+        threading.Thread(target=self._record_audio, daemon=True).start()
+        logger.info("Registrazione audio avviata")
+        self.transcription_signal.emit("Registrazione in corso... Parla adesso.")
+
+    def stop_recording(self):
+        """Ferma la registrazione audio."""
+        if not self.recording:
+            return
+        
+        self.recording = False
+        
+        # Chiudi stream e PyAudio
+        if self.stream:
+            self.stream.stop_stream()
+            self.stream.close()
+        if self.p:
+            self.p.terminate()
+        
+        # Invia l'audio registrato
+        if self.audio_buffer and self.connected:
+            self._send_audio_buffer()
+        
+        # Verifica che il websocket sia ancora disponibile
+        if not hasattr(self, 'websocket') or not self.websocket or not self.connected:
+            logger.warning("WebSocket non disponibile per inviare commit o richieste")
+            return
+        
+        # Comunica che l'input audio è terminato
+        try:
+            commit_message = {
+                "type": "input_audio_buffer.commit"
+            }
+            self.websocket.send(json.dumps(commit_message))
+            logger.info("Audio input terminato (commit finale)")
+            
+            # Richiedi una risposta solo se non c'è già una richiesta pendente
+            if not self.response_pending:
+                response_request = {
+                    "type": "response.create",
+                    "response": {
+                        "modalities": ["text"]  # Solo testo come output
+                    }
+                }
+                self.websocket.send(json.dumps(response_request))
+                logger.info("Richiesta risposta finale inviata")
+            else:
+                logger.info("Risposta già in corso, non inviata nuova richiesta")
+        except Exception as e:
+            logger.error(f"Errore durante l'invio dei messaggi di terminazione: {str(e)}")
+        
+        # Reset della flag di risposta pendente
+        self.response_pending = False
+        logger.info("Registrazione audio fermata")
+
+    def _record_audio(self):
+        """Registra audio in loop fino a quando non viene fermato."""
+        try:
+            self.last_commit_time = time.time()
+            while self.recording and self.stream:
+                data = self.stream.read(self.CHUNK, exception_on_overflow=False)
+                self.audio_buffer.append(data)
+                
+                # Calcola il valore RMS per rilevare se c'è silenzio
+                rms = self._calculate_rms(data)
+                current_time = time.time()
+                
+                # Rileva inizio e fine del parlato
+                if rms > self.silence_threshold:
+                    # L'utente sta parlando
+                    if not self.is_speaking:
+                        logger.info(f"Inizio parlato rilevato (RMS: {rms})")
+                        self.is_speaking = True
+                    self.silence_start_time = 0  # Reset del timer del silenzio
+                else:
+                    # Silenzio rilevato
+                    if self.is_speaking:
+                        # Se prima stava parlando, inizia a contare il silenzio
+                        if self.silence_start_time == 0:
+                            self.silence_start_time = current_time
+                        elif (current_time - self.silence_start_time >= self.pause_duration and 
+                              current_time - self.last_commit_time >= self.min_commit_interval):
+                            # Pausa significativa rilevata, invia commit
+                            logger.info(f"Pausa rilevata ({current_time - self.silence_start_time:.2f}s) - Invio audio per elaborazione")
+                            self._send_audio_commit()
+                            self.audio_buffer = []
+                            self.is_speaking = False
+                            self.silence_start_time = 0
+                            self.last_commit_time = current_time
+                
+                # Invia l'audio accumulato in blocchi più grandi (circa 2.5 secondi invece di 0.6)
+                if len(self.audio_buffer) >= self.buffer_size_to_send and self.connected:
+                    self._send_audio_buffer()
+                    logger.info(f"Invio buffer audio di {self.buffer_size_to_send} chunk")
+                    
+                # Anche se non c'è stata una pausa, invia un commit periodico se è passato abbastanza tempo
+                if (current_time - self.last_commit_time >= 7.0 and  # Aumentato a 7 secondi massimo senza commit
+                    len(self.audio_buffer) > 20 and  # Solo se c'è abbastanza audio
+                    not self.response_pending and
+                    self.connected):
+                    logger.info("Inviando commit periodico dopo 7 secondi di parlato continuo")
+                    self._send_audio_commit()
+                    self.audio_buffer = []
+                    self.last_commit_time = current_time
+                
+        except Exception as e:
+            logger.error(f"Errore durante la registrazione: {str(e)}")
+            self.error_signal.emit(f"Errore registrazione: {str(e)}")
+            self.recording = False
+
+    def _calculate_rms(self, data):
+        """Calcola il valore RMS (Root Mean Square) di un buffer audio."""
+        try:
+            # Converti i byte in short integers
+            shorts = np.frombuffer(data, dtype=np.int16)
+            # Calcola RMS
+            rms = np.sqrt(np.mean(np.square(shorts)))
+            return rms
+        except Exception as e:
+            logger.error(f"Errore nel calcolo RMS: {str(e)}")
+            return 0
+
+    def _send_audio_commit(self):
+        """Invia un commit per l'audio raccolto finora e richiede una risposta."""
+        if not self.connected or self.response_pending:
+            return
+            
+        try:
+            # Invia il buffer audio rimanente
+            if self.audio_buffer:
+                self._send_audio_buffer()
+                self.audio_buffer = []
+                
+            # Invia il comando di commit
+            commit_message = {
+                "type": "input_audio_buffer.commit"
+            }
+            self.websocket.send(json.dumps(commit_message))
+            logger.info("Audio input parziale terminato (commit)")
+            
+            # Richiedi una risposta
+            response_request = {
+                "type": "response.create",
+                "response": {
+                    "modalities": ["text"]  # Solo testo come output
+                }
+            }
+            self.websocket.send(json.dumps(response_request))
+            logger.info("Richiesta risposta inviata durante la registrazione")
+            self.response_pending = True
+            
+        except Exception as e:
+            logger.error(f"Errore durante l'invio del commit: {str(e)}")
+
+    def _send_audio_buffer(self):
+        """Converte e invia i dati audio al WebSocket."""
+        if not self.audio_buffer or not self.connected:
+            return
+        
+        try:
+            # Combina tutti i chunk in un unico buffer
+            audio_data = b''.join(self.audio_buffer)
+            
+            # Converti in base64
+            base64_audio = base64.b64encode(audio_data).decode('ascii')
+            
+            # Invia al WebSocket
+            audio_message = {
+                "type": "input_audio_buffer.append",
+                "audio": base64_audio
+            }
+            self.websocket.send(json.dumps(audio_message))
+            logger.info(f"Inviati {len(base64_audio)} bytes di audio")
+            
+        except Exception as e:
+            logger.error(f"Errore nell'invio dell'audio: {str(e)}")
 
 
 class IntervistaAssistant(QMainWindow):
@@ -574,9 +486,9 @@ class IntervistaAssistant(QMainWindow):
         
         # Stato dell'applicazione
         self.recording = False
-        self.audio_thread = None
+        self.text_thread = None  # Rinominato da audio_thread a text_thread
         self.chat_history = []
-        self.shutdown_in_progress = False  # Flag per evitare click multipli sul pulsante stop
+        self.shutdown_in_progress = False
         
         # Inizializza utility
         self.screenshot_manager = ScreenshotManager()
@@ -593,23 +505,30 @@ class IntervistaAssistant(QMainWindow):
         central_widget = QWidget()
         main_layout = QVBoxLayout(central_widget)
         
-        # Splitter per dividere area trascrizione e risposta
+        # Splitter per dividere area input e risposta
         splitter = QSplitter(Qt.Vertical)
         
-        # Area di trascrizione
-        transcription_container = QWidget()
-        transcription_layout = QVBoxLayout(transcription_container)
+        # Area di input utente (audio)
+        input_container = QWidget()
+        input_layout = QVBoxLayout(input_container)
         
-        transcription_label = QLabel("Trascrizione Audio:")
-        transcription_label.setFont(QFont("Arial", 12, QFont.Bold))
+        input_label = QLabel("Input dell'utente (audio):")  
+        input_label.setFont(QFont("Arial", 12, QFont.Bold))
         
         self.transcription_text = QTextEdit()
         self.transcription_text.setReadOnly(True)
         self.transcription_text.setFont(QFont("Arial", 11))
         self.transcription_text.setMinimumHeight(150)
         
-        transcription_layout.addWidget(transcription_label)
-        transcription_layout.addWidget(self.transcription_text)
+        # Pulsante per parlare
+        self.speak_button = QPushButton("Parla")
+        self.speak_button.setFont(QFont("Arial", 11))
+        self.speak_button.clicked.connect(self.toggle_speaking)
+        self.speak_button.setEnabled(False)  # Disabilitato finché la sessione non è attiva
+        
+        input_layout.addWidget(input_label)
+        input_layout.addWidget(self.transcription_text)
+        input_layout.addWidget(self.speak_button)
         
         # Area di risposta
         response_container = QWidget()
@@ -626,14 +545,14 @@ class IntervistaAssistant(QMainWindow):
         response_layout.addWidget(self.response_text)
         
         # Aggiungi widget al splitter
-        splitter.addWidget(transcription_container)
+        splitter.addWidget(input_container)
         splitter.addWidget(response_container)
-        splitter.setSizes([300, 500])  # Proporzioni iniziali
+        splitter.setSizes([300, 500])
         
         # Controlli
         controls_layout = QHBoxLayout()
         
-        self.record_button = QPushButton("Inizia Registrazione")
+        self.record_button = QPushButton("Inizia Sessione")  # Cambiato da "Inizia Registrazione"
         self.record_button.setFont(QFont("Arial", 11))
         self.record_button.clicked.connect(self.toggle_recording)
         
@@ -666,21 +585,24 @@ class IntervistaAssistant(QMainWindow):
         self.setCentralWidget(central_widget)
         
     def toggle_recording(self):
-        """Attiva o disattiva la registrazione audio."""
+        """Attiva o disattiva la connessione al modello."""
         if not self.recording:
-            # Avvia registrazione
+            # Avvia la connessione
             self.recording = True
-            self.record_button.setText("Ferma Registrazione")
+            self.record_button.setText("Termina Sessione")
             self.record_button.setStyleSheet("background-color: #ff5555;")
             
-            # Avvia thread di registrazione con Realtime API
-            self.audio_thread = RealtimeAudioThread()
-            self.audio_thread.transcription_signal.connect(self.update_transcription)
-            self.audio_thread.response_signal.connect(self.update_response)
-            self.audio_thread.error_signal.connect(self.show_error)
-            self.audio_thread.connection_status_signal.connect(self.update_connection_status)
-            self.audio_thread.finished.connect(self.recording_finished)
-            self.audio_thread.start()
+            # Avvia thread di comunicazione con Realtime API
+            self.text_thread = RealtimeTextThread()
+            self.text_thread.transcription_signal.connect(self.update_transcription)
+            self.text_thread.response_signal.connect(self.update_response)
+            self.text_thread.error_signal.connect(self.show_error)
+            self.text_thread.connection_status_signal.connect(self.update_connection_status)
+            self.text_thread.finished.connect(self.recording_finished)
+            self.text_thread.start()
+            
+            # Abilita il pulsante per parlare
+            self.speak_button.setEnabled(True)
         else:
             # Previeni click multipli
             if self.shutdown_in_progress:
@@ -692,26 +614,40 @@ class IntervistaAssistant(QMainWindow):
             self.record_button.setText("Terminazione in corso...")
             self.record_button.setEnabled(False)
             
-            # Ferma registrazione
-            self.stop_recording()
-    
-    def stop_recording(self):
-        """Ferma la registrazione e ripristina l'interfaccia."""
-        if self.audio_thread:
-            self.audio_thread.stop()
-            # Non usiamo wait() qui perché potrebbe bloccare l'interfaccia utente
-            # Il segnale finished ci notificherà quando il thread è terminato
+            # Ferma la registrazione audio se attiva
+            if hasattr(self.text_thread, 'recording') and self.text_thread.recording:
+                try:
+                    self.text_thread.stop_recording()
+                except Exception as e:
+                    logger.error(f"Errore durante l'arresto della registrazione: {str(e)}")
+                
+                self.speak_button.setText("Parla")
+                self.speak_button.setStyleSheet("")
+                
+                # Disabilita il pulsante per parlare
+                self.speak_button.setEnabled(False)
+            
+            # Ferma la connessione in modo controllato
+            try:
+                if self.text_thread:
+                    self.text_thread.stop()
+                    # Attendi max 2 secondi per la terminazione pulita
+                    self.text_thread.wait(2000)
+            except Exception as e:
+                logger.error(f"Errore durante la terminazione della sessione: {str(e)}")
+                # Anche in caso di errore, aggiorna l'UI
+                self.recording_finished()
     
     def recording_finished(self):
-        """Chiamato quando il thread di registrazione è terminato."""
+        """Chiamato quando il thread è terminato."""
         self.recording = False
         self.shutdown_in_progress = False
-        self.record_button.setText("Inizia Registrazione")
+        self.record_button.setText("Inizia Sessione")  # Cambiato da "Inizia Registrazione"
         self.record_button.setStyleSheet("")
         self.record_button.setEnabled(True)
         
         # Aggiungi un messaggio alla trascrizione
-        self.transcription_text.append("\n[Registrazione terminata]")
+        self.transcription_text.append("\n[Sessione terminata]")  # Cambiato da "Registrazione terminata"
     
     def update_connection_status(self, connected):
         """Aggiorna l'interfaccia in base allo stato della connessione."""
@@ -882,13 +818,43 @@ class IntervistaAssistant(QMainWindow):
         
     def closeEvent(self, event):
         """Gestisce l'evento di chiusura dell'applicazione."""
-        if self.recording and self.audio_thread:
+        if self.recording and self.text_thread:
             # Mostra un messaggio che stiamo terminando
             self.transcription_text.append("\n[Chiusura dell'applicazione in corso...]")
-            # Ferma la registrazione
-            self.audio_thread.stop()
-            self.audio_thread.wait(2000)  # Aspetta max 2 secondi
+            
+            try:
+                # Ferma la comunicazione
+                self.text_thread.stop()
+                # Aspetta max 2 secondi
+                self.text_thread.wait(2000)
+            except Exception as e:
+                logger.error(f"Errore durante la chiusura dell'applicazione: {str(e)}")
+        
         event.accept()
+
+    def toggle_speaking(self):
+        """Attiva o disattiva la registrazione della voce."""
+        if not self.recording or not self.text_thread or not self.text_thread.connected:
+            self.show_error("Non sei connesso. Inizia prima una sessione.")
+            return
+        
+        if not hasattr(self.text_thread, 'recording') or not self.text_thread.recording:
+            # Inizia a registrare
+            self.speak_button.setText("Stop")
+            self.speak_button.setStyleSheet("background-color: #ff5555;")
+            self.text_thread.start_recording()
+        else:
+            # Ferma la registrazione
+            self.speak_button.setText("Parla")
+            self.speak_button.setStyleSheet("")
+            self.text_thread.stop_recording()
+
+    def stop_recording(self):
+        """Ferma la registrazione e chiude la connessione al server."""
+        logger.info("IntervistaAssistant: Fermando la registrazione")
+        # Non fa nulla, metodo mantenuto per compatibilità con vecchio codice
+        # La chiusura viene gestita direttamente in toggle_recording
+        pass
 
 
 def main():
