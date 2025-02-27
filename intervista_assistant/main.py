@@ -73,6 +73,12 @@ class RealtimeTextThread(QThread):
         # Variabile per contenere (eventualmente) la trascrizione della voce.
         # In una soluzione completa va impostata dal motore speech-to-text locale.
         self.current_text = ""
+        
+        # Inizializzazione del buffer per accumulare i delta della trascrizione audio
+        self._response_transcript_buffer = ""
+        
+        # Aggiungi un buffer per accumulare le delta della risposta
+        self._response_buffer = ""
 
     async def realtime_session(self):
         """Gestisce una sessione per la comunicazione tramite Realtime API."""
@@ -102,16 +108,33 @@ class RealtimeTextThread(QThread):
                 self.last_event_time = time.time()
                 self.current_text = ""
                 
-                # Invia la configurazione della sessione
+                # Configurazione della sessione aggiornata senza la sezione "tools"
                 session_config = {
+                    "event_id": "event_123",  # identificatore univoco per l'evento, se necessario
                     "type": "session.update",
                     "session": {
-                        "modalities": ["audio", "text"],
-                        "turn_detection": None,
+                        "modalities": ["text", "audio"],
+                        "instructions": "You are a helpful assistant.",
+                        "voice": "sage",
                         "input_audio_format": "pcm16",
-                        "output_audio_format": "pcm16"  # output esclusivamente testuale
+                        "output_audio_format": "pcm16",
+                        "input_audio_transcription": {
+                            "model": "whisper-1"
+                        },
+                        "turn_detection": {
+                            "type": "server_vad",
+                            "threshold": 0.5,
+                            "prefix_padding_ms": 300,
+                            "silence_duration_ms": 500,
+                            "create_response": True
+                        },
+                        # Rimosso il blocco 'tools' e correlati
+                        "tool_choice": "auto",
+                        "temperature": 0.8,
+                        "max_response_output_tokens": "inf"
                     }
                 }
+                
                 try:
                     ws.send(json.dumps(session_config))
                     logger.info("Configurazione sessione inviata (audio e text)")
@@ -119,19 +142,15 @@ class RealtimeTextThread(QThread):
                     logger.error("Errore invio configurazione: " + str(e))
                 
                 # Reinserisci il system prompt per istruire il modello
-                system_instructions = (
-                    "Sei un assistente AI per interviste di lavoro, specializzato in domande per software engineer.\n"
-                    "Rispondi in modo conciso e strutturato con elenchi puntati dove appropriato.\n"
-                    "Focalizzati sugli aspetti tecnici, i principi di design, le best practice e gli algoritmi.\n"
-                    "Non essere prolisso. Fornisci esempi pratici dove utile.\n"
-                    "Le tue risposte saranno mostrate a schermo durante un'intervista, quindi sii chiaro e diretto."
-                )
                 system_message = {
                     "type": "conversation.item.create",
                     "item": {
                         "type": "message",
                         "role": "system",
-                        "content": [{"type": "input_text", "text": system_instructions}]
+                        "content": [{
+                            "type": "input_text",
+                            "text": "Sei un assistente AI per interviste di lavoro, specializzato in domande per software engineer. Rispondi in modo conciso e strutturato."
+                        }]
                     }
                 }
                 try:
@@ -140,8 +159,7 @@ class RealtimeTextThread(QThread):
                 except Exception as e:
                     logger.error("Errore invio messaggio di system prompt: " + str(e))
                 
-                # Non inviamo qui un messaggio utente fisso.
-                # Richiesta di risposta
+                # Invio della richiesta di risposta
                 response_request = {
                     "type": "response.create",
                     "response": {"modalities": ["text"]}
@@ -155,41 +173,44 @@ class RealtimeTextThread(QThread):
                 self.transcription_signal.emit("Connesso! Pronto per l'intervista. Parla per fare domande.")
             
             def on_message(ws, message):
-                self.last_event_time = time.time()
                 try:
                     event = json.loads(message)
                     event_type = event.get('type', 'sconosciuto')
                     logger.info(f"Evento ricevuto: {event_type}")
                     
-                    if event_type == 'response.audio.delta':
-                        logger.info("Evento audio ricevuto (output audio disabilitato)")
+                    if event_type == 'response.audio_transcript.delta':
+                        delta = event.get('delta', '')
+                        self._response_transcript_buffer += delta
+                        logger.debug("Trascrizione delta accumulata: %s", delta)
+                    
+                    elif event_type == 'response.audio_transcript.done':
+                        transcribed_text = self._response_transcript_buffer.strip()
+                        self.current_text = transcribed_text
+                        self.response_signal.emit(transcribed_text)
+                        logger.info("Trascrizione audio finale: %s", transcribed_text)
+                        self._response_transcript_buffer = ""
                     
                     elif event_type == 'response.text.delta':
-                        # Accumula il delta, ma non aggiornare l'interfaccia finché la risposta non è completa.
                         delta = event.get('delta', '')
-                        self.current_text += delta
+                        self._response_buffer += delta
+                        logger.debug("Accumulated delta: %s", delta)
                     
-                    elif event_type == 'response.text.done':
-                        if hasattr(self, 'current_text') and self.current_text.strip():
-                            # Invia la risposta completa, evitando output parziali.
-                            self.response_signal.emit(self.current_text)
-                            self.current_text = ""
-                    
-                    elif event_type == 'response.done':
-                        self.response_pending = False
-                        status = event.get('response', {}).get('status', '')
-                        if status == 'failed':
-                            status_details = event.get('response', {}).get('status_details', {})
-                            error_info = status_details.get('error', {})
-                            error_message = error_info.get('message', 'Errore sconosciuto')
-                            logger.error(f"Errore nella risposta: {error_message}")
-                            self.error_signal.emit(f"Errore API: {error_message}")
+                    elif event_type in ('response.text.done', 'response.done'):
+                        if self._response_buffer.strip():
+                            self.response_signal.emit(self._response_buffer)
+                            logger.info("Response completata: %s", self._response_buffer)
+                            self._response_buffer = ""
                     
                     elif event_type == 'error':
                         self.response_pending = False
                         error = event.get('error', {})
                         error_msg = error.get('message', 'Errore sconosciuto')
                         self.error_signal.emit(f"Errore API: {error_msg}")
+                        logger.error("Errore ricevuto: %s", error_msg)
+                    
+                    else:
+                        # Gestire altri eventi se necessario
+                        logger.debug("Messaggio ricevuto di tipo %s", event_type)
                 
                 except Exception as e:
                     logger.error("Eccezione in on_message: " + str(e))
@@ -263,27 +284,37 @@ class RealtimeTextThread(QThread):
         logger.info("Thread di comunicazione terminato")
             
     def stop(self):
-        """Ferma la comunicazione."""
+        """Ferma la comunicazione e termina tutti i processi pendenti."""
         logger.info("Richiesta di stop comunicazione ricevuta")
         self.running = False
-        
-        # Ferma la registrazione audio se attiva
-        if self.recording:
+        self.recording = False  # Assicurati di interrompere il ciclo di registrazione
+
+        # Se la registrazione sta ancora andando, interrompi e chiudi lo stream
+        if self.stream:
             try:
-                self.stop_recording()
+                self.stream.stop_stream()
+                self.stream.close()
             except Exception as e:
-                logger.error("Errore nello stop_recording: " + str(e))
-        
-        # Chiude il websocket se attivo
+                logger.error("Errore nello stop dello stream: " + str(e))
+        if self.p:
+            try:
+                self.p.terminate()
+            except Exception as e:
+                logger.error("Errore terminazione di PyAudio: " + str(e))
+
+        # Se il websocket è attivo, chiudilo
         if getattr(self, "websocket", None) and self.connected:
             try:
                 logger.info("Chiusura WebSocket in corso...")
                 self.websocket.close()
                 logger.info("WebSocket chiuso")
             except Exception as e:
-                logger.error("Errore nella chiusura del WebSocket: " + str(e))
+                logger.error("Errore nella chiusura del websocket: " + str(e))
         
-        self.transcription_signal.emit(self.transcription_buffer + "\n[Terminazione sessione in corso...]")
+        logger.info("Terminazione richiesta completata. Attendo la chiusura dei thread pendenti...")
+
+        # Aggiungi un piccolo delay per dare il tempo ai thread di terminare
+        time.sleep(0.5)
 
     def start_recording(self):
         """Avvia la registrazione audio dal microfono."""
@@ -403,10 +434,15 @@ class RealtimeTextThread(QThread):
                     self._send_audio_buffer()
                     logger.info(f"Invio buffer audio di {self.buffer_size_to_send} chunk")
                     
+                # Controlla se la registrazione è stata interrotta
+                if not self.recording:
+                    logger.info("Stop della registrazione rilevato, uscita dal ciclo di acquisizione audio.")
+                    break
+
+                # Logica per commit periodico/invio buffer
                 if (current_time - self.last_commit_time >= 30.0 and 
                     len(self.audio_buffer) > 20 and 
-                    not self.response_pending and 
-                    self.connected):
+                    not self.response_pending and self.connected):
                     logger.info("Inviando commit periodico dopo 30 secondi di parlato continuo")
                     self._send_audio_commit()
                     self.audio_buffer = []
@@ -417,10 +453,18 @@ class RealtimeTextThread(QThread):
             self.recording = False
 
     def _calculate_rms(self, data):
-        """Calcola il valore RMS (Root Mean Square) di un buffer audio."""
+        """Calcola il valore RMS (Root Mean Square) per un buffer audio.
+        
+        Viene usata una conversione in float32 per evitare overflow e NaN.
+        """
         try:
-            shorts = np.frombuffer(data, dtype=np.int16)
+            # Converte il buffer in un array di float32
+            shorts = np.frombuffer(data, dtype=np.int16).astype(np.float32)
             rms = np.sqrt(np.mean(np.square(shorts)))
+            # Se per qualche motivo rms risulta NaN, ritorna 0
+            if np.isnan(rms):
+                logger.warning("Il calcolo dell'RMS ha prodotto NaN, ritorno 0")
+                return 0
             return rms
         except Exception as e:
             logger.error("Errore nel calcolo RMS: " + str(e))
