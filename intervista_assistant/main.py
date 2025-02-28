@@ -16,6 +16,8 @@ from PyQt5.QtGui import QFont
 from openai import OpenAI
 from dotenv import load_dotenv
 
+import markdown  # Per convertire markdown in HTML
+
 from .utils import ScreenshotManager
 
 import pyaudio
@@ -176,7 +178,7 @@ class RealtimeTextThread(QThread):
                 try:
                     event = json.loads(message)
                     event_type = event.get('type', 'sconosciuto')
-                    logger.info(f"Evento ricevuto: {event_type}")
+                    logger.debug(f"Evento ricevuto: {event_type}")
                     
                     if event_type == 'response.audio_transcript.delta':
                         delta = event.get('delta', '')
@@ -506,6 +508,10 @@ class IntervistaAssistant(QMainWindow):
         self.setWindowTitle("Assistente Intervista Software Engineer")
         self.setGeometry(100, 100, 1200, 800)
         
+        # Impostazione del font predefinito più grande per tutta l'app
+        app_font = QFont("Arial", 12)
+        QApplication.setFont(app_font)
+        
         central_widget = QWidget()
         main_layout = QVBoxLayout(central_widget)
         
@@ -515,11 +521,11 @@ class IntervistaAssistant(QMainWindow):
         input_layout = QVBoxLayout(input_container)
         
         input_label = QLabel("Input dell'utente (audio):")
-        input_label.setFont(QFont("Arial", 12, QFont.Bold))
+        input_label.setFont(QFont("Arial", 14, QFont.Bold))
         
         self.transcription_text = QTextEdit()
         self.transcription_text.setReadOnly(True)
-        self.transcription_text.setFont(QFont("Arial", 11))
+        self.transcription_text.setFont(QFont("Arial", 13))
         self.transcription_text.setMinimumHeight(150)
         
         # Tasto "Parla" rimosso perché l'app inizierà ad ascoltare subito dopo il "Inizia Sessione".
@@ -537,11 +543,13 @@ class IntervistaAssistant(QMainWindow):
         response_layout = QVBoxLayout(response_container)
         
         response_label = QLabel("Risposta:")
-        response_label.setFont(QFont("Arial", 12, QFont.Bold))
+        response_label.setFont(QFont("Arial", 14, QFont.Bold))
         
         self.response_text = QTextEdit()
         self.response_text.setReadOnly(True)
-        self.response_text.setFont(QFont("Arial", 11))
+        self.response_text.setFont(QFont("Arial", 13))
+        # Configura il QTextEdit per interpretare HTML
+        self.response_text.setAcceptRichText(True)
         
         response_layout.addWidget(response_label)
         response_layout.addWidget(self.response_text)
@@ -553,23 +561,23 @@ class IntervistaAssistant(QMainWindow):
         controls_layout = QHBoxLayout()
         
         self.record_button = QPushButton("Inizia Sessione")
-        self.record_button.setFont(QFont("Arial", 11))
+        self.record_button.setFont(QFont("Arial", 13))
         self.record_button.clicked.connect(self.toggle_recording)
         
         self.clear_button = QPushButton("Pulisci")
-        self.clear_button.setFont(QFont("Arial", 11))
+        self.clear_button.setFont(QFont("Arial", 13))
         self.clear_button.clicked.connect(self.clear_text)
         
         self.screenshot_button = QPushButton("Screenshot")
-        self.screenshot_button.setFont(QFont("Arial", 11))
+        self.screenshot_button.setFont(QFont("Arial", 13))
         self.screenshot_button.clicked.connect(self.take_screenshot)
         
         self.share_button = QPushButton("Condividi Screenshot")
-        self.share_button.setFont(QFont("Arial", 11))
+        self.share_button.setFont(QFont("Arial", 13))
         self.share_button.clicked.connect(self.share_screenshot)
         
         self.save_button = QPushButton("Salva Conversazione")
-        self.save_button.setFont(QFont("Arial", 11))
+        self.save_button.setFont(QFont("Arial", 13))
         self.save_button.clicked.connect(self.save_conversation)
         
         controls_layout.addWidget(self.record_button)
@@ -666,16 +674,216 @@ class IntervistaAssistant(QMainWindow):
                 self.chat_history.append({"role": "user", "content": text})
     
     def update_response(self, text):
-        """Aggiorna il campo della risposta."""
+        """Aggiorna il campo della risposta con formattazione markdown."""
         if not text:
             return
         current_time = datetime.now().strftime("%H:%M:%S")
-        formatted_response = f"\n--- Risposta alle {current_time} ---\n{text}\n"
-        current_text = self.response_text.toPlainText()
-        if not current_text:
-            self.response_text.setText(formatted_response)
+        
+        # Stile CSS completamente rivisto per uniformità
+        html_style = """
+        <style>
+            /* Stili base uniformi */
+            body, p, div, span, li, td, th {
+                font-family: 'Arial', sans-serif !important;
+                font-size: 14px !important;
+                line-height: 1.6 !important;
+                color: #333333 !important;
+            }
+            
+            /* Titoli con dimensioni proporzionali */
+            h1 { font-size: 20px !important; margin: 20px 0 10px 0 !important; font-weight: bold !important; }
+            h2 { font-size: 18px !important; margin: 18px 0 9px 0 !important; font-weight: bold !important; }
+            h3 { font-size: 16px !important; margin: 16px 0 8px 0 !important; font-weight: bold !important; }
+            h4 { font-size: 15px !important; margin: 14px 0 7px 0 !important; font-weight: bold !important; }
+            
+            /* Blocchi di codice */
+            pre {
+                background-color: #f5f5f5 !important;
+                border: 1px solid #cccccc !important;
+                border-radius: 4px !important;
+                padding: 10px !important;
+                margin: 10px 0 !important;
+                overflow-x: auto !important;
+                font-family: Consolas, 'Courier New', monospace !important;
+                font-size: 14px !important;
+                line-height: 1.45 !important;
+                tab-size: 4 !important;
+                white-space: pre !important;
+            }
+            
+            /* Codice inline */
+            code {
+                font-family: Consolas, 'Courier New', monospace !important;
+                font-size: 14px !important;
+                background-color: #f5f5f5 !important;
+                padding: 2px 4px !important;
+                border-radius: 3px !important;
+                border: 1px solid #cccccc !important;
+                color: #333333 !important;
+                white-space: pre !important;
+            }
+            
+            /* Liste uniformi */
+            ul, ol { 
+                margin: 10px 0 10px 20px !important; 
+                padding-left: 20px !important; 
+            }
+            li { 
+                margin-bottom: 6px !important; 
+            }
+            
+            /* Paragrafi con spaziatura uniforme */
+            p { 
+                margin: 10px 0 !important;
+            }
+            
+            /* Enfasi del testo */
+            strong { font-weight: bold !important; }
+            em { font-style: italic !important; }
+            
+            /* Tabelle */
+            table {
+                border-collapse: collapse !important;
+                width: 100% !important;
+                margin: 15px 0 !important;
+                font-size: 14px !important;
+            }
+            th, td {
+                border: 1px solid #dddddd !important;
+                padding: 8px !important;
+                text-align: left !important;
+            }
+            th {
+                background-color: #f2f2f2 !important;
+                font-weight: bold !important;
+            }
+            
+            /* Intestazione risposta */
+            .response-header {
+                color: #666666 !important;
+                font-size: 13px !important;
+                margin: 15px 0 10px 0 !important;
+                border-bottom: 1px solid #eeeeee !important;
+                padding-bottom: 5px !important;
+                font-weight: bold !important;
+            }
+        </style>
+        """
+        
+        # Intestazione con timestamp
+        header = f'<div class="response-header">--- Risposta alle {current_time} ---</div>'
+        
+        # Processo manuale del testo per garantire uniformità
+        def process_code_blocks(text):
+            """Processa i blocchi di codice preservando spazi e formattazione"""
+            import re
+            
+            # Funzione per sostituire blocchi di codice con HTML corretto
+            def replace_code_block(match):
+                language = match.group(1).strip() if match.group(1) else ""
+                code = match.group(2)
+                # Preserva tutti gli spazi e formattazione originale
+                code_html = code.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                # Mantieni la struttura esatta dell'indentazione
+                return f'<pre><code class="language-{language}">{code_html}</code></pre>'
+            
+            # Funzione per sostituire codice inline
+            def replace_inline_code(match):
+                code = match.group(1)
+                code_html = code.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                return f'<code>{code_html}</code>'
+            
+            # Prima sostituisci i blocchi di codice con triple backtick
+            # Usiamo un pattern migliorato che cattura correttamente tutto il contenuto
+            processed = re.sub(r'```([^\n]*)\n([\s\S]*?)\n```', replace_code_block, text)
+            
+            # Poi sostituisci il codice inline con singolo backtick
+            processed = re.sub(r'`([^`\n]+?)`', replace_inline_code, processed)
+            
+            return processed
+        
+        # Elaborazione completamente personalizzata del markdown
+        def custom_markdown(text):
+            import re
+            
+            # Prima processa i blocchi di codice per preservare la loro formattazione
+            text = process_code_blocks(text)
+            
+            # Titoli
+            text = re.sub(r'^# (.+)$', r'<h1>\1</h1>', text, flags=re.MULTILINE)
+            text = re.sub(r'^## (.+)$', r'<h2>\1</h2>', text, flags=re.MULTILINE)
+            text = re.sub(r'^### (.+)$', r'<h3>\1</h3>', text, flags=re.MULTILINE)
+            text = re.sub(r'^#### (.+)$', r'<h4>\1</h4>', text, flags=re.MULTILINE)
+            
+            # Liste puntate - pattern migliorato per catturare l'indentazione
+            text = re.sub(r'^(\s*)-\s+(.+)$', r'\1<li>\2</li>', text, flags=re.MULTILINE)
+            # Raggruppa elementi di lista in tag <ul>
+            pattern_ul = r'(<li>.*?</li>)(\n<li>.*?</li>)*'
+            text = re.sub(pattern_ul, r'<ul>\g<0></ul>', text)
+            
+            # Liste numerate
+            text = re.sub(r'^(\s*)\d+\.\s+(.+)$', r'\1<li>\2</li>', text, flags=re.MULTILINE)
+            # Raggruppa elementi di lista numerata in tag <ol>
+            pattern_ol = r'(<li>.*?</li>)(\n<li>.*?</li>)*'
+            text = re.sub(pattern_ol, r'<ol>\g<0></ol>', text)
+            
+            # Enfasi - grassetto e corsivo
+            text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+            text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
+            text = re.sub(r'__(.+?)__', r'<strong>\1</strong>', text)
+            text = re.sub(r'_(.+?)_', r'<em>\1</em>', text)
+            
+            # Paragrafi: converti le linee di testo in paragrafi
+            # Evita di avvolgere in <p> il contenuto già in tag HTML
+            lines = text.split('\n')
+            in_html_block = False
+            for i, line in enumerate(lines):
+                # Salta linee vuote e linee che iniziano con HTML
+                if not line.strip() or line.strip().startswith('<'):
+                    continue
+                # Controlla se stiamo entrando/uscendo da un blocco HTML
+                if '<pre>' in line or '<ul>' in line or '<ol>' in line or '<h' in line:
+                    in_html_block = True
+                elif '</pre>' in line or '</ul>' in line or '</ol>' in line or '</h' in line:
+                    in_html_block = False
+                    continue
+                # Se non siamo in un blocco HTML, avvolgi la linea in <p>
+                if not in_html_block:
+                    lines[i] = f'<p>{line}</p>'
+            text = '\n'.join(lines)
+            
+            # Rimuovi paragrafi vuoti
+            text = re.sub(r'<p>\s*</p>', '', text)
+            
+            # Link
+            text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
+            
+            return text
+        
+        # Elabora il testo completamente con il nostro parser personalizzato
+        html_content = custom_markdown(text)
+        
+        # Assembla il messaggio HTML completo
+        formatted_html = f"{html_style}{header}{html_content}"
+        
+        # Configura il QTextEdit per interpretare HTML
+        self.response_text.setAcceptRichText(True)
+        
+        # Imposta o appende il testo formattato
+        current_html = self.response_text.toHtml()
+        if not self.response_text.toPlainText():
+            self.response_text.setHtml(formatted_html)
         else:
-            self.response_text.append(formatted_response)
+            # Appendi il nuovo contenuto mantenendo la formattazione precedente
+            closing_index = current_html.rfind("</body>")
+            if closing_index > 0:
+                new_html = current_html[:closing_index] + f"{header}{html_content}" + current_html[closing_index:]
+                self.response_text.setHtml(new_html)
+            else:
+                # Fallback se non troviamo i tag di chiusura
+                self.response_text.setHtml(current_html + formatted_html)
+        
+        # Scorri alla fine
         self.response_text.verticalScrollBar().setValue(
             self.response_text.verticalScrollBar().maximum()
         )

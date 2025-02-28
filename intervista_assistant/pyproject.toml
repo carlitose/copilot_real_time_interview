@@ -21,6 +21,7 @@ sounddevice = "^0.5.1"
 soundfile = "^0.13.1"
 textual = "^2.1.2"
 pydub = "^0.25.1"
+markdown = "^3.7"
 
 
 [build-system]
