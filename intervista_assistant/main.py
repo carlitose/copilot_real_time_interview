@@ -52,6 +52,7 @@ class RealtimeTextThread(QThread):
         # Configurazione audio
         self.recording = False
         self.audio_buffer = []
+        self.accumulated_audio = b''  # Accumula l'audio per invio in un unico messaggio
         self.CHUNK = 1024
         self.FORMAT = pyaudio.paInt16
         self.CHANNELS = 1
@@ -68,16 +69,15 @@ class RealtimeTextThread(QThread):
         self.silence_start_time = 0
         self.last_commit_time = 0
         self.response_pending = False
-        self.buffer_size_to_send = 40   # circa 2.5 secondi di audio
+        self.buffer_size_to_send = 40   # non più usato
         
         # Variabile per contenere (eventualmente) la trascrizione della voce.
-        # In una soluzione completa va impostata dal motore speech-to-text locale.
         self.current_text = ""
         
-        # Inizializzazione del buffer per accumulare i delta della trascrizione audio
+        # Buffer per accumulare i delta della trascrizione audio
         self._response_transcript_buffer = ""
         
-        # Aggiungi un buffer per accumulare le delta della risposta
+        # Buffer per accumulare i delta della risposta
         self._response_buffer = ""
 
     async def realtime_session(self):
@@ -322,6 +322,7 @@ class RealtimeTextThread(QThread):
             return
         self.recording = True
         self.audio_buffer = []
+        self.accumulated_audio = b''
         
         try:
             self.p = pyaudio.PyAudio()
@@ -357,35 +358,21 @@ class RealtimeTextThread(QThread):
             except Exception as e:
                 logger.error("Errore nella terminazione di PyAudio: " + str(e))
         
-        if self.audio_buffer and self.connected:
-            self._send_audio_buffer()
         if not (hasattr(self, 'websocket') and self.websocket and self.connected):
             logger.warning("WebSocket non disponibile per inviare richieste")
             return
         
         try:
-            # Qui inviamo il commit finale dell'audio
+            # Invia il messaggio audio unico con tutto l'audio registrato
+            if self.accumulated_audio and self.connected:
+                self._send_entire_audio_message()
+            
+            # Invia il commit finale dell'audio
             commit_message = {"type": "input_audio_buffer.commit"}
             self.websocket.send(json.dumps(commit_message))
             logger.info("Audio input terminato (commit finale)")
             
-            # Dopo il commit, inviamo un nuovo messaggio utente basato sulla trascrizione
-            # ATTENZIONE: Qui utilizziamo self.current_text come segnaposto per il testo trascritto.
-            # In una soluzione completa, integra un modulo di speech-to-text per ottenere la trascrizione effettiva.
-            if self.current_text.strip():
-                user_message = {
-                    "type": "conversation.item.create",
-                    "item": {
-                        "type": "message",
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": self.current_text}]
-                    }
-                }
-                self.websocket.send(json.dumps(user_message))
-                logger.info("Messaggio utente inviato dal commit vocale")
-                # È buona norma resettare la variabile dopo l'invio
-                self.current_text = ""
-            
+            # Invia la richiesta per la risposta
             if not self.response_pending:
                 response_request = {
                     "type": "response.create",
@@ -408,10 +395,11 @@ class RealtimeTextThread(QThread):
             while self.recording and self.stream:
                 data = self.stream.read(self.CHUNK, exception_on_overflow=False)
                 self.audio_buffer.append(data)
+                self.accumulated_audio += data
                 
+                # Calcolo RMS per eventuale logging (opzionale)
                 rms = self._calculate_rms(data)
                 current_time = time.time()
-                
                 if rms > self.silence_threshold:
                     if not self.is_speaking:
                         logger.info(f"Inizio parlato rilevato (RMS: {rms})")
@@ -423,30 +411,35 @@ class RealtimeTextThread(QThread):
                             self.silence_start_time = current_time
                         elif (current_time - self.silence_start_time >= self.pause_duration and 
                               current_time - self.last_commit_time >= self.min_commit_interval):
-                            logger.info(f"Pausa rilevata ({current_time - self.silence_start_time:.2f}s) - Invio audio per elaborazione")
-                            self._send_audio_commit()
+                            # Controllo se il buffer ha almeno 100ms di audio (16000Hz * 0.1 * 2 byte = 3200 bytes)
+                            if len(self.accumulated_audio) >= 3200:
+                                logger.info(f"Pausa rilevata ({current_time - self.silence_start_time:.2f}s) - invio audio parziale")
+                                # Invia l'audio accumulato in un unico messaggio parziale
+                                self._send_entire_audio_message()
+                                
+                                # Invia il commit per il messaggio audio parziale
+                                commit_message = {"type": "input_audio_buffer.commit"}
+                                self.websocket.send(json.dumps(commit_message))
+                                logger.info("Commit dell'audio parziale inviato")
+                                
+                                # Invia la richiesta per la risposta, se non in corso
+                                if not self.response_pending:
+                                    response_request = {"type": "response.create", "response": {"modalities": ["text"]}}
+                                    self.websocket.send(json.dumps(response_request))
+                                    logger.info("Richiesta di risposta inviata dopo audio parziale")
+                                    self.response_pending = True
+                            else:
+                                logger.info(f"Pausa rilevata ma buffer troppo piccolo ({len(self.accumulated_audio)} bytes), continuo ad accumulare")
+                            
+                            self.last_commit_time = current_time
+                            self.silence_start_time = 0
+                            self.accumulated_audio = b''
                             self.audio_buffer = []
                             self.is_speaking = False
-                            self.silence_start_time = 0
-                            self.last_commit_time = current_time
                 
-                if len(self.audio_buffer) >= self.buffer_size_to_send and self.connected:
-                    self._send_audio_buffer()
-                    logger.info(f"Invio buffer audio di {self.buffer_size_to_send} chunk")
-                    
-                # Controlla se la registrazione è stata interrotta
                 if not self.recording:
                     logger.info("Stop della registrazione rilevato, uscita dal ciclo di acquisizione audio.")
                     break
-
-                # Logica per commit periodico/invio buffer
-                if (current_time - self.last_commit_time >= 30.0 and 
-                    len(self.audio_buffer) > 20 and 
-                    not self.response_pending and self.connected):
-                    logger.info("Inviando commit periodico dopo 30 secondi di parlato continuo")
-                    self._send_audio_commit()
-                    self.audio_buffer = []
-                    self.last_commit_time = current_time
         except Exception as e:
             logger.error("Errore durante la registrazione: " + str(e))
             self.error_signal.emit("Errore registrazione: " + str(e))
@@ -470,45 +463,24 @@ class RealtimeTextThread(QThread):
             logger.error("Errore nel calcolo RMS: " + str(e))
             return 0
 
-    def _send_audio_commit(self):
-        """Invia un commit per l'audio raccolto finora e richiede una risposta."""
-        if not self.connected or self.response_pending:
+    def _send_entire_audio_message(self):
+        """Invia l'intero audio accumulato come un singolo messaggio."""
+        if not self.accumulated_audio or not self.connected:
             return
         try:
-            if not hasattr(self, 'audio_history'):
-                self.audio_history = []
-            if self.audio_buffer:
-                self.audio_history.append(b''.join(self.audio_buffer))
-                self._send_audio_buffer()
-                self.audio_buffer = []
-            commit_message = {"type": "input_audio_buffer.commit"}
-            self.websocket.send(json.dumps(commit_message))
-            logger.info("Audio input parziale terminato (commit)")
-            response_request = {
-                "type": "response.create",
-                "response": {"modalities": ["text"]}
-            }
-            self.websocket.send(json.dumps(response_request))
-            logger.info("Richiesta risposta inviata durante la registrazione")
-            self.response_pending = True
-        except Exception as e:
-            logger.error("Errore durante l'invio del commit: " + str(e))
-
-    def _send_audio_buffer(self):
-        """Converte e invia i dati audio al WebSocket."""
-        if not self.audio_buffer or not self.connected:
-            return
-        try:
-            audio_data = b''.join(self.audio_buffer)
-            base64_audio = base64.b64encode(audio_data).decode('ascii')
+            base64_audio = base64.b64encode(self.accumulated_audio).decode('ascii')
             audio_message = {
-                "type": "input_audio_buffer.append",
-                "audio": base64_audio
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_audio", "audio": base64_audio}]
+                }
             }
             self.websocket.send(json.dumps(audio_message))
-            logger.info(f"Inviati {len(base64_audio)} bytes di audio")
+            logger.info("Messaggio audio unico inviato")
         except Exception as e:
-            logger.error("Errore nell'invio dell'audio: " + str(e))
+            logger.error("Errore nell'invio del messaggio audio unico: " + str(e))
 
 
 class IntervistaAssistant(QMainWindow):
