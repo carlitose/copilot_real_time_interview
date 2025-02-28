@@ -753,8 +753,8 @@ class IntervistaAssistant(QMainWindow):
     
     def show_error(self, message):
         """Mostra un messaggio di errore."""
-        if "buffer too small" in message:
-            # Se il messaggio contiene "buffer too small", logga solo senza mostrare il popup
+        if "buffer too small" in message or "Conversation already has an active response" in message:
+            # Se il messaggio contiene uno degli errori specifici, logga solo senza mostrare il popup
             logger.warning(f"Errore ignorato (solo log): {message}")
         else:
             # Per tutti gli altri errori, mostra il popup come prima
