@@ -411,7 +411,6 @@ class RealtimeTextThread(QThread):
                             self.silence_start_time = current_time
                         elif (current_time - self.silence_start_time >= self.pause_duration and 
                               current_time - self.last_commit_time >= self.min_commit_interval):
-                            # Controllo se il buffer ha almeno 100ms di audio (16000Hz * 0.1 * 2 byte = 3200 bytes)
                             if len(self.accumulated_audio) >= 3200:
                                 logger.info(f"Pausa rilevata ({current_time - self.silence_start_time:.2f}s) - invio audio parziale")
                                 # Invia l'audio accumulato in un unico messaggio parziale
@@ -428,14 +427,15 @@ class RealtimeTextThread(QThread):
                                     self.websocket.send(json.dumps(response_request))
                                     logger.info("Richiesta di risposta inviata dopo audio parziale")
                                     self.response_pending = True
+                                
+                                self.last_commit_time = current_time
+                                self.silence_start_time = 0
+                                self.accumulated_audio = b''
+                                self.audio_buffer = []
+                                self.is_speaking = False
                             else:
                                 logger.info(f"Pausa rilevata ma buffer troppo piccolo ({len(self.accumulated_audio)} bytes), continuo ad accumulare")
-                            
-                            self.last_commit_time = current_time
-                            self.silence_start_time = 0
-                            self.accumulated_audio = b''
-                            self.audio_buffer = []
-                            self.is_speaking = False
+                                # Non aggiornare last_commit_time o resettare il buffer, per continuare ad accumulare
                 
                 if not self.recording:
                     logger.info("Stop della registrazione rilevato, uscita dal ciclo di acquisizione audio.")
