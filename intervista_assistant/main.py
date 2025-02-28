@@ -753,7 +753,12 @@ class IntervistaAssistant(QMainWindow):
     
     def show_error(self, message):
         """Mostra un messaggio di errore."""
-        QMessageBox.critical(self, "Errore", message)
+        if "buffer too small" in message:
+            # Se il messaggio contiene "buffer too small", logga solo senza mostrare il popup
+            logger.warning(f"Errore ignorato (solo log): {message}")
+        else:
+            # Per tutti gli altri errori, mostra il popup come prima
+            QMessageBox.critical(self, "Errore", message)
         
     def closeEvent(self, event):
         """Gestisce la chiusura dell'applicazione."""
