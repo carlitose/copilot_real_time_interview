@@ -455,7 +455,7 @@ class RealtimeTextThread(QThread):
                 "item": {
                     "type": "message",
                     "role": "user",
-                    "content": [{"type": "text", "text": text}]
+                    "content": [{"type": "input_text", "text": text}]
                 }
             }
             
