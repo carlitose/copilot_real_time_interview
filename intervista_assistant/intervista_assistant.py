@@ -9,7 +9,7 @@ from datetime import datetime
 import base64
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QMessageBox, QFileDialog)
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QObject, QThread, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QFont
 
 from openai import OpenAI
@@ -331,58 +331,67 @@ class IntervistaAssistant(QMainWindow):
             screenshot_path = self.screenshot_manager.take_screenshot(monitor_index=selected_monitor)
             self.showNormal()
             
-            # Convert the image to base64
-            with open(screenshot_path, "rb") as image_file:
-                base64_image = base64.b64encode(image_file.read()).decode('utf-8')
-            
             # Update UI to show we're sending the image
             self.transcription_text.append("\n[Screenshot sent for analysis]\n")
-            self.response_text.append("<p><i>Image analysis in progress...</i></p>")
+            self.response_text.append("<p><i>Image analysis in progress... The app is still responsive.</i></p>")
             QApplication.processEvents()  # Update UI
             
             # Prepare messages for gpt-4o including chat history
-            messages = self._prepare_messages_with_history(base64_image)
+            messages = self._prepare_messages_with_history(base64_image=None)
             
-            try:
-                # Call gpt-4o to analyze the image with the chat history for context
-                logger.info("Sending image to gpt-4o for analysis")
-                response = self.client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=messages,
-                    max_tokens=1000
-                )
-                
-                # Get the assistant's response
-                assistant_response = response.choices[0].message.content
-                logger.info(f"Received response from gpt-4o: {assistant_response[:100]}...")
-                
-                # Add the response to UI and chat history
-                self.update_response(assistant_response)
-                
-                # Now send the analysis as text to the realtime thread to maintain conversation flow
-                if self.text_thread and self.text_thread.connected:
-                    # Send a shortened version of the response to the realtime thread
-                    # This helps the model know what was in the image without having to see it
-                    context_msg = f"[I've analyzed the screenshot of a coding exercise/technical interview question. Here's what I found: {assistant_response[:500]}... Let me know if you need more specific details or have questions about how to approach this problem.]"
-                    success = self.text_thread.send_text(context_msg)
-                    if success:
-                        logger.info("Image analysis context sent to realtime thread")
-                    else:
-                        logger.error("Failed to send image analysis context to realtime thread")
-                
-                logger.info(f"Screenshot analyzed: {screenshot_path}")
-                
-            except Exception as e:
-                error_msg = f"Error during image analysis: {str(e)}"
-                self.show_error(error_msg)
-                logger.error(error_msg)
+            # Aggiorna l'ultimo messaggio per includere l'immagine (verrà convertita nel worker)
+            messages[-1]["content"][1]["image_url"]["url"] = "placeholder"  # Sarà sostituito nel worker
+            
+            # Crea un thread e un worker per l'analisi asincrona
+            self.analysis_thread = QThread()
+            self.analysis_worker = ImageAnalysisWorker(self.client, messages, screenshot_path)
+            
+            # Sposta il worker nel thread
+            self.analysis_worker.moveToThread(self.analysis_thread)
+            
+            # Connetti i segnali e gli slot
+            self.analysis_thread.started.connect(self.analysis_worker.analyze)
+            self.analysis_worker.analysisComplete.connect(self.on_analysis_complete)
+            self.analysis_worker.error.connect(self.show_error)
+            self.analysis_worker.analysisComplete.connect(self.analysis_thread.quit)
+            self.analysis_worker.error.connect(self.analysis_thread.quit)
+            self.analysis_thread.finished.connect(self.analysis_worker.deleteLater)
+            self.analysis_thread.finished.connect(self.analysis_thread.deleteLater)
+            
+            # Avvia il thread
+            self.analysis_thread.start()
+            
+            logger.info(f"Screenshot capture initiated: {screenshot_path}")
             
         except Exception as e:
-            error_msg = f"Error during screenshot capture and analysis: {str(e)}"
+            error_msg = f"Error during screenshot capture: {str(e)}"
             self.show_error(error_msg)
             logger.error(error_msg)
     
-    def _prepare_messages_with_history(self, base64_image):
+    def on_analysis_complete(self, assistant_response):
+        """Callback invocato quando l'analisi dell'immagine è completata."""
+        try:
+            # Aggiorna l'UI con la risposta
+            self.update_response(assistant_response)
+            
+            # Invia l'analisi come testo al thread realtime per mantenere il flusso della conversazione
+            if self.text_thread and self.text_thread.connected:
+                # Invia una versione ridotta della risposta al thread realtime
+                context_msg = f"[I've analyzed the screenshot of a coding exercise/technical interview question. Here's what I found: {assistant_response[:500]}... Let me know if you need more specific details or have questions about how to approach this problem.]"
+                success = self.text_thread.send_text(context_msg)
+                if success:
+                    logger.info("Image analysis context sent to realtime thread")
+                else:
+                    logger.error("Failed to send image analysis context to realtime thread")
+            
+            logger.info("Screenshot analysis completed successfully")
+            
+        except Exception as e:
+            error_msg = f"Error handling analysis response: {str(e)}"
+            self.show_error(error_msg)
+            logger.error(error_msg)
+    
+    def _prepare_messages_with_history(self, base64_image=None):
         """Prepare messages array for gpt-4o including chat history and image."""
         messages = []
         
@@ -397,11 +406,12 @@ class IntervistaAssistant(QMainWindow):
         messages.extend(history_to_include)
         
         # Add the image message
+        image_url = f"data:image/jpeg;base64,{base64_image}" if base64_image else ""
         messages.append({
             "role": "user",
             "content": [
                 {"type": "text", "text": "Please analyze this screenshot of a potential technical interview question or coding exercise. Describe what you see in detail, extract any visible code or problem statement, explain the problem if possible, and suggest approaches or ideas to solve it."},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                {"type": "image_url", "image_url": {"url": image_url}}
             ]
         })
         
@@ -470,3 +480,50 @@ class IntervistaAssistant(QMainWindow):
         """Method preserved for compatibility (stop handling is done in toggle_recording)."""
         logger.info("IntervistaAssistant: Stopping recording")
         pass 
+
+class ImageAnalysisWorker(QObject):
+    """Worker class per l'analisi asincrona delle immagini."""
+    
+    # Segnali per comunicare con l'UI
+    analysisComplete = pyqtSignal(str)  # Emesso quando l'analisi è completata
+    error = pyqtSignal(str)  # Emesso in caso di errore
+    
+    def __init__(self, client, messages, screenshot_path):
+        super().__init__()
+        self.client = client
+        self.messages = messages
+        self.screenshot_path = screenshot_path
+        self.base64_image = None
+        
+    @pyqtSlot()
+    def analyze(self):
+        """Esegue l'analisi dell'immagine in background."""
+        try:
+            # Converti l'immagine in base64 se non è già stato fatto
+            if not self.base64_image:
+                with open(self.screenshot_path, "rb") as image_file:
+                    self.base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+            
+            # Aggiorna l'URL dell'immagine nel messaggio
+            image_url = f"data:image/jpeg;base64,{self.base64_image}"
+            self.messages[-1]["content"][1]["image_url"]["url"] = image_url
+            
+            # Chiamata a GPT-4o per analizzare l'immagine
+            logger.info("Sending image to gpt-4o for analysis")
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=self.messages,
+                max_tokens=1000
+            )
+            
+            # Ottieni la risposta dell'assistente
+            assistant_response = response.choices[0].message.content
+            logger.info(f"Received response from gpt-4o: {assistant_response[:100]}...")
+            
+            # Emetti il segnale con la risposta
+            self.analysisComplete.emit(assistant_response)
+            
+        except Exception as e:
+            error_msg = f"Error during image analysis: {str(e)}"
+            logger.error(error_msg)
+            self.error.emit(error_msg) 
