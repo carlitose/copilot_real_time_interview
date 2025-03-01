@@ -9,7 +9,7 @@ import base64
 import sys
 
 from openai import AsyncOpenAI
-from audio_util import audio_to_pcm16_base64, SAMPLE_RATE
+from tests.audio_util import audio_to_pcm16_base64, SAMPLE_RATE
 
 async def receiver(conn):
     """Task per ricevere e stampare i messaggi dal server finché la connessione è aperta."""
