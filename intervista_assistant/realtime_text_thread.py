@@ -433,4 +433,48 @@ class RealtimeTextThread(QThread):
             self.websocket.send(json.dumps(audio_message))
             logger.info("Single audio message sent")
         except Exception as e:
-            logger.error("Error sending single audio message: " + str(e)) 
+            logger.error("Error sending single audio message: " + str(e))
+            
+    def send_text(self, text):
+        """Sends a text message to the model through the websocket connection.
+        
+        Args:
+            text: The text message to send
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        if not self.connected or not self.websocket:
+            logger.error("Cannot send text: WebSocket not connected")
+            return False
+            
+        try:
+            # Create the text message
+            text_message = {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "text", "text": text}]
+                }
+            }
+            
+            # Send the message through the websocket
+            self.websocket.send(json.dumps(text_message))
+            logger.info(f"Text message sent through websocket: {text[:50]}...")
+            
+            # Request a response
+            if not self.response_pending:
+                response_request = {"type": "response.create", "response": {"modalities": ["text"]}}
+                self.websocket.send(json.dumps(response_request))
+                logger.info("Response request sent after text message")
+                self.response_pending = True
+                
+            # Reset buffers
+            self._response_buffer = ""
+            
+            return True
+        except Exception as e:
+            error_msg = f"Error sending text message: {str(e)}"
+            logger.error(error_msg)
+            return False 

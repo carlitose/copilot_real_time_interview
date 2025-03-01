@@ -6,6 +6,7 @@ import json
 import logging
 import asyncio
 from datetime import datetime
+import base64
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QMessageBox, QFileDialog)
 from PyQt5.QtCore import Qt
@@ -51,19 +52,17 @@ class IntervistaAssistant(QMainWindow):
         self.response_text = self.central_widget.response_text
         self.record_button = self.central_widget.record_button
         self.clear_button = self.central_widget.clear_button
-        self.screenshot_button = self.central_widget.screenshot_button
-        self.share_button = self.central_widget.share_button
+        self.analyze_screenshot_button = self.central_widget.analyze_screenshot_button
         self.save_button = self.central_widget.save_button
         
         # Configure the main window appearance
-        self.setWindowTitle("Interview Assistant Software Engineer")
-        self.setGeometry(100, 100, 1200, 800)
+        self.setWindowTitle("Intervista Assistant")
+        self.resize(1000, 800)
         
         # Connect signals to slots
         self.record_button.clicked.connect(self.toggle_recording)
         self.clear_button.clicked.connect(self.clear_text)
-        self.screenshot_button.clicked.connect(self.take_screenshot)
-        self.share_button.clicked.connect(self.share_screenshot)
+        self.analyze_screenshot_button.clicked.connect(self.take_and_send_screenshot)
         self.save_button.clicked.connect(self.save_conversation)
         
     def toggle_recording(self):
@@ -288,34 +287,99 @@ class IntervistaAssistant(QMainWindow):
             previous_content = self.chat_history[-1]["content"]
             self.chat_history[-1]["content"] = f"{previous_content}\n--- Response at {current_time} ---\n{text}"
     
-    def take_screenshot(self):
-        """Capture and save a screenshot."""
+    def take_and_send_screenshot(self):
+        """Capture screenshot and send it to the OpenAI model.
+        
+        Uses gpt-4o to analyze the image and then forwards the response to the realtime thread.
+        This creates a seamless conversation flow even though realtime API doesn't support images.
+        """
         try:
+            # Check if realtime thread is active
+            if not self.recording or not self.text_thread or not self.text_thread.connected:
+                QMessageBox.warning(self, "Not Connected", 
+                                    "You need to start a session first before analyzing images.")
+                return
+                
             self.showMinimized()
             time.sleep(0.5)
             screenshot_path = self.screenshot_manager.take_screenshot()
             self.showNormal()
-            QMessageBox.information(self, "Screenshot", 
-                                      f"Screenshot saved in: {screenshot_path}")
+            
+            # Convert the image to base64
+            with open(screenshot_path, "rb") as image_file:
+                base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+            
+            # Update UI to show we're sending the image
+            self.transcription_text.append("\n[Screenshot sent for analysis]\n")
+            self.response_text.append("<p><i>Image analysis in progress...</i></p>")
+            QApplication.processEvents()  # Update UI
+            
+            # Prepare messages for gpt-4o including chat history
+            messages = self._prepare_messages_with_history(base64_image)
+            
+            try:
+                # Call gpt-4o to analyze the image with the chat history for context
+                logger.info("Sending image to gpt-4o for analysis")
+                response = self.client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=messages,
+                    max_tokens=1000
+                )
+                
+                # Get the assistant's response
+                assistant_response = response.choices[0].message.content
+                logger.info(f"Received response from gpt-4o: {assistant_response[:100]}...")
+                
+                # Add the response to UI and chat history
+                self.update_response(assistant_response)
+                
+                # Now send the analysis as text to the realtime thread to maintain conversation flow
+                if self.text_thread and self.text_thread.connected:
+                    # Send a shortened version of the response to the realtime thread
+                    # This helps the model know what was in the image without having to see it
+                    context_msg = f"[The screenshot I just analyzed showed: {assistant_response[:500]}...]"
+                    success = self.text_thread.send_text(context_msg)
+                    if success:
+                        logger.info("Image analysis context sent to realtime thread")
+                    else:
+                        logger.error("Failed to send image analysis context to realtime thread")
+                
+                logger.info(f"Screenshot analyzed: {screenshot_path}")
+                
+            except Exception as e:
+                error_msg = f"Error during image analysis: {str(e)}"
+                self.show_error(error_msg)
+                logger.error(error_msg)
+            
         except Exception as e:
-            error_msg = f"Error during screenshot capture: {str(e)}"
+            error_msg = f"Error during screenshot capture and analysis: {str(e)}"
             self.show_error(error_msg)
             logger.error(error_msg)
     
-    def share_screenshot(self):
-        """Capture a screenshot and offer options to share it."""
-        try:
-            self.showMinimized()
-            time.sleep(0.5)
-            screenshot_path = self.screenshot_manager.take_screenshot()
-            self.showNormal()
-            self.screenshot_manager.copy_to_clipboard(screenshot_path)
-            QMessageBox.information(self, "Screenshot Shared", 
-                                      f"Screenshot saved in: {screenshot_path}\n\nThe path has been copied to the clipboard.")
-        except Exception as e:
-            error_msg = f"Error during screenshot sharing: {str(e)}"
-            self.show_error(error_msg)
-            logger.error(error_msg)
+    def _prepare_messages_with_history(self, base64_image):
+        """Prepare messages array for gpt-4o including chat history and image."""
+        messages = []
+        
+        # Add system message
+        messages.append({
+            "role": "system", 
+            "content": "You are a helpful assistant analyzing images in the context of an ongoing conversation. Provide detailed and comprehensive analysis of the images you are shown."
+        })
+        
+        # Add previous conversation history (excluding the last few entries which might be UI updates)
+        history_to_include = self.chat_history[:-2] if len(self.chat_history) > 2 else []
+        messages.extend(history_to_include)
+        
+        # Add the image message
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Please analyze this screenshot in detail. Describe what you see, extract any text, and relate it to our ongoing conversation if relevant."},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+            ]
+        })
+        
+        return messages
     
     def clear_text(self):
         """Clear the text fields."""
