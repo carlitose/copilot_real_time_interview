@@ -70,11 +70,14 @@ class IntervistaAssistantUI(QWidget):
         self.clear_button.setFont(QFont("Arial", 13))
         self.save_button = QPushButton("Save Conversation", self)
         self.save_button.setFont(QFont("Arial", 13))
+        self.think_button = QPushButton("Think", self)  
+        self.think_button.setFont(QFont("Arial", 13))
 
         # Add controls to layout
         self.controls_layout.addWidget(self.record_button)
         self.controls_layout.addWidget(self.clear_button)
         self.controls_layout.addWidget(self.save_button)
+        self.controls_layout.addWidget(self.think_button)
 
         # Add splitter, screenshot layout, and controls layout to main layout
         self.main_layout.addWidget(self.splitter)

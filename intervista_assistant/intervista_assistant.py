@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 
 from .realtime_text_thread import RealtimeTextThread
 from .utils import ScreenshotManager, ScreenSelectorDialog
+from .utils.think_process import ThinkProcess
 from .ui import IntervistaAssistantUI
 
 # Logging configuration
@@ -56,18 +57,19 @@ class IntervistaAssistant(QMainWindow):
         self.save_button = self.central_widget.save_button
         self.screen_selector_combo = self.central_widget.screen_selector_combo
         
-        # Popola il menu a tendina con i monitor disponibili
+        # Connect signals from the UI to handlers
+        self.central_widget.record_button.clicked.connect(self.toggle_recording)
+        self.central_widget.clear_button.clicked.connect(self.clear_text)
+        self.central_widget.save_button.clicked.connect(self.save_conversation)
+        self.central_widget.analyze_screenshot_button.clicked.connect(self.take_and_send_screenshot)
+        self.central_widget.think_button.clicked.connect(self.show_think_dialog)
+        
+        # Populate the screen selector combo box
         self._populate_screen_selector()
         
-        # Configure the main window appearance
-        self.setWindowTitle("Intervista Assistant")
-        self.resize(1000, 800)
-        
-        # Connect signals to slots
-        self.record_button.clicked.connect(self.toggle_recording)
-        self.clear_button.clicked.connect(self.clear_text)
-        self.analyze_screenshot_button.clicked.connect(self.take_and_send_screenshot)
-        self.save_button.clicked.connect(self.save_conversation)
+        # Set window properties
+        self.setWindowTitle("Intervista AI Assistant")
+        self.resize(1280, 720)
         
     def _populate_screen_selector(self):
         """Popola il menu a tendina con i monitor disponibili."""
@@ -481,6 +483,100 @@ class IntervistaAssistant(QMainWindow):
         logger.info("IntervistaAssistant: Stopping recording")
         pass 
 
+    def show_think_dialog(self):
+        """
+        Avvia il processo di pensiero avanzato in modo parallelo e mostra i risultati nella chat principale.
+        """
+        try:
+            logger.info("Starting Think process in background")
+            
+            # Se non c'è una conversazione, mostra un messaggio
+            if not self.chat_history:
+                QMessageBox.information(self, "No conversation", 
+                                      "There's no conversation to analyze. "
+                                      "Please start a conversation session first.")
+                return
+            
+            # Verifica che siamo connessi alla sessione
+            if not self.recording or not self.text_thread or not self.text_thread.connected:
+                QMessageBox.warning(self, "Session not active", 
+                                    "You need to start a session before using the Think function.")
+                return
+            
+            # Aggiorna l'interfaccia per mostrare che stiamo elaborando
+            self.transcription_text.append("\n[Deep analysis of the conversation in progress...]\n")
+            self.response_text.append("<p><i>Advanced thinking process in progress... The application remains responsive.</i></p>")
+            QApplication.processEvents()  # Aggiorna l'UI
+            
+            # Crea un thread per l'elaborazione asincrona
+            self.think_thread = QThread()
+            
+            # Prepara i messaggi per l'elaborazione
+            messages_for_processing = []
+            for msg in self.chat_history:
+                messages_for_processing.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+            
+            # Crea il worker per l'elaborazione
+            self.think_worker = ThinkWorker(self.client, messages_for_processing)
+            
+            # Sposta il worker nel thread
+            self.think_worker.moveToThread(self.think_thread)
+            
+            # Connetti i segnali e gli slot
+            self.think_thread.started.connect(self.think_worker.process)
+            self.think_worker.summaryComplete.connect(self.on_summary_complete)
+            self.think_worker.solutionComplete.connect(self.on_solution_complete)
+            self.think_worker.error.connect(self.show_error)
+            self.think_worker.solutionComplete.connect(self.think_thread.quit)
+            self.think_worker.error.connect(self.think_thread.quit)
+            self.think_thread.finished.connect(self.think_worker.deleteLater)
+            self.think_thread.finished.connect(self.think_thread.deleteLater)
+            
+            # Avvia il thread
+            self.think_thread.start()
+            
+        except Exception as e:
+            logger.error(f"Error during Think process startup: {e}")
+            QMessageBox.critical(self, "Error", f"An error occurred: {e}")
+    
+    def on_summary_complete(self, summary):
+        """Callback invocato quando il riassunto è completato."""
+        try:
+            # Aggiorna l'UI con la risposta del riassunto
+            self.update_response("**🧠 CONVERSATION SUMMARY (GPT-4o-mini):**\n\n" + summary)
+            
+            logger.info("Conversation summary completed")
+            
+        except Exception as e:
+            error_msg = f"Error in summary handling: {str(e)}"
+            self.show_error(error_msg)
+            logger.error(error_msg)
+    
+    def on_solution_complete(self, solution):
+        """Callback invocato quando la soluzione è completata."""
+        try:
+            # Aggiorna l'UI con la risposta della soluzione
+            self.update_response("**🚀 IN-DEPTH ANALYSIS AND SOLUTION (o1-preview):**\n\n" + solution)
+            
+            # Invia la soluzione come testo al thread realtime per mantenere il flusso della conversazione
+            if self.text_thread and self.text_thread.connected:
+                context_msg = f"[I've completed an in-depth analysis of our conversation. I've identified the key problems and generated detailed solutions. If you have specific questions about any part of the solution, let me know!]"
+                success = self.text_thread.send_text(context_msg)
+                if success:
+                    logger.info("Analysis context sent to realtime thread")
+                else:
+                    logger.error("Unable to send analysis context to realtime thread")
+            
+            logger.info("In-depth analysis process completed successfully")
+            
+        except Exception as e:
+            error_msg = f"Error in solution handling: {str(e)}"
+            self.show_error(error_msg)
+            logger.error(error_msg)
+
 class ImageAnalysisWorker(QObject):
     """Worker class per l'analisi asincrona delle immagini."""
     
@@ -509,9 +605,9 @@ class ImageAnalysisWorker(QObject):
             self.messages[-1]["content"][1]["image_url"]["url"] = image_url
             
             # Chiamata a GPT-4o per analizzare l'immagine
-            logger.info("Sending image to gpt-4o for analysis")
+            logger.info("Sending image to gpt-4o-mini for analysis")
             response = self.client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4o-mini",
                 messages=self.messages,
                 max_tokens=1000
             )
@@ -527,3 +623,99 @@ class ImageAnalysisWorker(QObject):
             error_msg = f"Error during image analysis: {str(e)}"
             logger.error(error_msg)
             self.error.emit(error_msg) 
+
+class ThinkWorker(QObject):
+    """Worker class for asynchronous advanced thinking processing."""
+    
+    # Signals to communicate with the UI
+    summaryComplete = pyqtSignal(str)  # Emitted when summary is completed
+    solutionComplete = pyqtSignal(str)  # Emitted when solution is completed
+    error = pyqtSignal(str)  # Emitted in case of error
+    
+    def __init__(self, client, messages):
+        super().__init__()
+        self.client = client
+        self.messages = messages
+        
+    @pyqtSlot()
+    def process(self):
+        """Performs the advanced thinking process in background."""
+        try:
+            # Step 1: Generate summary with GPT-4o-mini
+            logger.info("Generating summary with GPT-4o-mini")
+            summary = self.generate_summary()
+            self.summaryComplete.emit(summary)
+            
+            # Step 2: Perform in-depth analysis with o1-preview
+            logger.info("Performing in-depth analysis with o1-preview")
+            solution = self.generate_solution(summary)
+            self.solutionComplete.emit(solution)
+            
+        except Exception as e:
+            error_msg = f"Error during thinking process: {str(e)}"
+            logger.error(error_msg)
+            self.error.emit(error_msg)
+    
+    def generate_summary(self):
+        """Generates a conversation summary using GPT-4o-mini."""
+        try:
+            # Create a summary prompt
+            summary_prompt = {
+                "role": "system",
+                "content": """Analyze the conversation history and create a concise summary in English. 
+                Focus on:
+                1. Key problems or questions discussed
+                2. Important context
+                3. Any programming challenges mentioned
+                4. Current state of the discussion
+                
+                Your summary should be comprehensive but brief, highlighting the most important aspects 
+                that would help another AI model solve any programming or logical problems mentioned."""
+            }
+            
+            # Clone messages and add system prompt
+            summary_messages = [summary_prompt] + self.messages
+            
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=summary_messages
+            )
+            
+            return response.choices[0].message.content
+            
+        except Exception as e:
+            logger.error(f"Error generating summary: {e}")
+            raise
+    
+    def generate_solution(self, summary):
+        """Generates a detailed solution using o1-preview based on the summary."""
+        try:
+            # Build the prompt
+            prompt = """
+            I'm working on a programming or logical task. Here's the context and problem:
+            
+            # CONTEXT
+            {}
+            
+            Please analyze this situation and:
+            1. Identify the core problem or challenge
+            2. Develop a structured approach to solve it
+            3. Provide a detailed solution with code if applicable
+            4. Explain your reasoning
+            """.format(summary)
+            
+            response = self.client.chat.completions.create(
+                model="o1-preview",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ]
+            )
+            
+            return response.choices[0].message.content
+            
+        except Exception as e:
+            logger.error(f"Error generating solution: {e}")
+            raise 
