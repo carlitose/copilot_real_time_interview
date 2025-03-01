@@ -526,6 +526,22 @@ python3-Xlib = {version = "*", markers = "platform_system == \"Linux\" and pytho
 rubicon-objc = {version = "*", markers = "platform_system == \"Darwin\""}
 
 [[package]]
+name = "mss"
+version = "9.0.2"
+description = "An ultra fast cross-platform multiple screenshots module in pure python using ctypes."
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "mss-9.0.2-py3-none-any.whl", hash = "sha256:685fa442cc96d8d88b4eb7aadbcccca7b858e789c9259b603e1ef0e435b60425"},
+    {file = "mss-9.0.2.tar.gz", hash = "sha256:c96a4ec73224da7db22bc07ef3cfaa18f8b86900d1872e29113bbcef0093a21e"},
+]
+
+[package.extras]
+dev = ["build (==1.2.1)", "mypy (==1.11.2)", "ruff (==0.6.3)", "twine (==5.1.1)", "wheel (==0.44.0)"]
+test = ["numpy (==2.1.0) ; sys_platform == \"windows\" and python_version >= \"3.13\"", "pillow (==10.4.0)", "pytest (==8.3.2)", "pytest-cov (==5.0.0)", "pytest-rerunfailures (==14.0.0)", "pyvirtualdisplay (==3.0) ; sys_platform == \"linux\"", "sphinx (==8.0.2)"]
+
+[[package]]
 name = "numpy"
 version = "2.2.3"
 description = "Fundamental package for array computing in Python"
@@ -1388,4 +1404,4 @@ test = ["websockets"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.11"
-content-hash = "4c9ba79258fbc6f034f21caeeb3dd9ddbbbe3abc90c553d8beae08eea3ebd179"
+content-hash = "67be8495681af0739bf1694656ef25165bf77f2dfb6d4661e9b2023e31dac199"

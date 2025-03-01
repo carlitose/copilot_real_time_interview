@@ -7,6 +7,8 @@ from pathlib import Path
 from datetime import datetime
 import logging
 
+import mss
+import mss.tools
 import pyautogui
 from PIL import Image
 import pyperclip
@@ -29,12 +31,31 @@ class ScreenshotManager:
             
         # Crea la directory se non esiste
         self.base_dir.mkdir(exist_ok=True)
+        
+        # Inizializza mss per gli screenshot
+        self.sct = mss.mss()
     
-    def take_screenshot(self, delay=0.5):
-        """Cattura uno screenshot dello schermo intero.
+    def get_monitors(self):
+        """Ottiene l'elenco dei monitor disponibili.
+        
+        Returns:
+            list: Lista dei monitor disponibili con le loro dimensioni
+        """
+        try:
+            monitors = self.sct.monitors
+            # Il primo elemento (index 0) è l'unione di tutti i monitor
+            # Ritorniamo i monitor individuali a partire da index 1
+            return monitors[1:]
+        except Exception as e:
+            logger.error(f"Errore nel recupero dei monitor: {str(e)}")
+            return []
+    
+    def take_screenshot(self, delay=0.5, monitor_index=None):
+        """Cattura uno screenshot dello schermo selezionato o dello schermo intero.
         
         Args:
             delay: Ritardo in secondi prima di catturare lo screenshot
+            monitor_index: Indice del monitor da catturare (None = schermo intero)
         
         Returns:
             Path: Percorso del file screenshot salvato
@@ -49,8 +70,22 @@ class ScreenshotManager:
             filepath = self.base_dir / filename
             
             # Cattura e salva lo screenshot
-            screenshot = pyautogui.screenshot()
-            screenshot.save(str(filepath))
+            if monitor_index is not None:
+                # Ottieni l'elenco dei monitor
+                monitors = self.get_monitors()
+                if 0 <= monitor_index < len(monitors):
+                    # Cattura lo screenshot del monitor specificato
+                    monitor = monitors[monitor_index]
+                    screenshot = self.sct.grab(monitor)
+                    mss.tools.to_png(screenshot.rgb, screenshot.size, output=str(filepath))
+                else:
+                    logger.warning(f"Indice monitor non valido: {monitor_index}, utilizzo schermo intero")
+                    screenshot = pyautogui.screenshot()
+                    screenshot.save(str(filepath))
+            else:
+                # Cattura lo screenshot dello schermo intero
+                screenshot = pyautogui.screenshot()
+                screenshot.save(str(filepath))
             
             logger.info(f"Screenshot salvato in: {filepath}")
             return filepath

@@ -16,7 +16,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 
 from .realtime_text_thread import RealtimeTextThread
-from .utils import ScreenshotManager
+from .utils import ScreenshotManager, ScreenSelectorDialog
 from .ui import IntervistaAssistantUI
 
 # Logging configuration
@@ -299,10 +299,18 @@ class IntervistaAssistant(QMainWindow):
                 QMessageBox.warning(self, "Not Connected", 
                                     "You need to start a session first before analyzing images.")
                 return
+            
+            # Show screen selection dialog and get the selected monitor index
+            selected_monitor = ScreenSelectorDialog.get_selected_monitor(self)
+            
+            # If user cancels the selection, return
+            if selected_monitor is None and selected_monitor != 0:
+                logger.info("Screenshot capture cancelled by user")
+                return
                 
             self.showMinimized()
             time.sleep(0.5)
-            screenshot_path = self.screenshot_manager.take_screenshot()
+            screenshot_path = self.screenshot_manager.take_screenshot(monitor_index=selected_monitor)
             self.showNormal()
             
             # Convert the image to base64

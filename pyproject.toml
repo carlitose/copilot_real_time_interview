@@ -22,6 +22,7 @@ soundfile = "^0.13.1"
 textual = "^2.1.2"
 pydub = "^0.25.1"
 markdown = "^3.7"
+mss = "^9.0.1"
 
 
 [build-system]
