@@ -31,7 +31,7 @@ if __name__ == "__main__":
     except ImportError as e:
         print(f"Errore di importazione: {e}")
         print("Assicurati di aver installato tutte le dipendenze richieste.")
-        print("Esegui: pip install -r intervista_assistant/requirements.txt")
+        print("Esegui: pip install -r requirements.txt")
         sys.exit(1)
         
     except Exception as e:
