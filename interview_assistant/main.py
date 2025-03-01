@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
 """
-Modulo di avvio dell'applicazione Intervista Assistant.
-Crea e avvia l'interfaccia utente dell'applicazione.
+Startup module for the Interview Assistant application.
+Creates and launches the application user interface.
 """
 
 import sys
 import logging
 from PyQt5.QtWidgets import QApplication
-from .intervista_assistant import IntervistaAssistant
+from .intervista_assistant import InterviewAssistant
 
-# Configurazione logging
+# Logging configuration
 logging.basicConfig(level=logging.INFO, 
                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                    filename='app.log')
 logger = logging.getLogger(__name__)
 
 def main():
-    """Funzione principale per avviare l'applicazione."""
+    """Main function to start the application."""
     try:
         app = QApplication(sys.argv)
-        window = IntervistaAssistant()
+        window = InterviewAssistant()
         window.show()
-        logger.info("Applicazione Intervista Assistant avviata con successo")
+        logger.info("Interview Assistant application started successfully")
         sys.exit(app.exec_())
     except Exception as e:
-        logger.error(f"Errore durante l'avvio dell'applicazione: {e}")
+        logger.error(f"Error during application startup: {e}")
         raise
 
 if __name__ == "__main__":

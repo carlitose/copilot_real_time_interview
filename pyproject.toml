@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "intervista-assistant"
+name = "interview-assistant"
 version = "0.1.0"
 description = ""
 authors = ["Carlo Giuseppe Sergi <c.sergi@icloud.com>"]

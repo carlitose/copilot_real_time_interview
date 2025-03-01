@@ -1,39 +1,38 @@
 #!/usr/bin/env python3
 """
-Script di avvio per Intervista Assistant.
-Questo script esegue l'applicazione dalla directory principale.
+Startup script for Interview Assistant.
+This is the main entry point for the application.
 """
 
-import os
 import sys
+import os
 import logging
+from pathlib import Path
 
-if __name__ == "__main__":
-    try:
-        # Configura il logging
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            handlers=[
-                logging.FileHandler("intervista_assistant.log"),
-                logging.StreamHandler()
-            ]
-        )
-        logger = logging.getLogger(__name__)
-        
-        # Messaggio di avvio
-        logger.info("Avvio di Intervista Assistant...")
-        
-        # Importa ed esegui l'applicazione
-        from intervista_assistant.main import main
-        main()
-        
-    except ImportError as e:
-        print(f"Errore di importazione: {e}")
-        print("Assicurati di aver installato tutte le dipendenze richieste.")
-        print("Esegui: pip install -r requirements.txt")
-        sys.exit(1)
-        
-    except Exception as e:
-        print(f"Errore durante l'avvio: {e}")
-        sys.exit(1) 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("interview_assistant.log"),
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Main execution
+try:
+    logger.info("Starting Interview Assistant...")
+    # Add project directory to path
+    sys.path.insert(0, str(Path(__file__).parent))
+    from interview_assistant.main import main
+    main()
+except ImportError as e:
+    logger.error(f"Import error: {e}")
+    print(f"Import error: {e}")
+    print("Make sure all dependencies are installed.")
+    sys.exit(1)
+except Exception as e:
+    logger.error(f"Startup error: {e}")
+    print(f"Startup error: {e}")
+    sys.exit(1) 

@@ -6,7 +6,7 @@ from PyQt5.QtGui import QFont
 import time
 
 
-class IntervistaAssistantUI(QWidget):
+class InterviewAssistantUI(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.init_ui()
@@ -21,7 +21,7 @@ class IntervistaAssistantUI(QWidget):
         # Input container
         self.input_container = QWidget(self)
         self.input_layout = QVBoxLayout(self.input_container)
-        self.input_label = QLabel("Input dell'utente (audio):", self.input_container)
+        self.input_label = QLabel("User input (audio):", self.input_container)
         self.input_label.setFont(QFont("Arial", 14, QFont.Bold))
         self.transcription_text = QTextEdit(self.input_container)
         self.transcription_text.setReadOnly(True)
@@ -33,7 +33,7 @@ class IntervistaAssistantUI(QWidget):
         # Response container
         self.response_container = QWidget(self)
         self.response_layout = QVBoxLayout(self.response_container)
-        self.response_label = QLabel("Risposta:", self.response_container)
+        self.response_label = QLabel("Response:", self.response_container)
         self.response_label.setFont(QFont("Arial", 14, QFont.Bold))
         self.response_text = QTextEdit(self.response_container)
         self.response_text.setReadOnly(True)
@@ -49,15 +49,15 @@ class IntervistaAssistantUI(QWidget):
 
         # Controls layout
         self.controls_layout = QHBoxLayout()
-        self.record_button = QPushButton("Inizia Sessione", self)
+        self.record_button = QPushButton("Start Session", self)
         self.record_button.setFont(QFont("Arial", 13))
-        self.clear_button = QPushButton("Pulisci", self)
+        self.clear_button = QPushButton("Clear", self)
         self.clear_button.setFont(QFont("Arial", 13))
         self.screenshot_button = QPushButton("Screenshot", self)
         self.screenshot_button.setFont(QFont("Arial", 13))
-        self.share_button = QPushButton("Condividi Screenshot", self)
+        self.share_button = QPushButton("Share Screenshot", self)
         self.share_button.setFont(QFont("Arial", 13))
-        self.save_button = QPushButton("Salva Conversazione", self)
+        self.save_button = QPushButton("Save Conversation", self)
         self.save_button.setFont(QFont("Arial", 13))
 
         # Add controls to layout
