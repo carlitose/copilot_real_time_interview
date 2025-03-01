@@ -8,6 +8,7 @@ import asyncio
 import threading
 import base64
 import numpy as np
+import pathlib
 
 import pyaudio
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -61,6 +62,34 @@ class RealtimeTextThread(QThread):
         
         # Variable to hold the final transcription
         self.current_text = ""
+        
+        # Path to the system prompt file
+        self.system_prompt_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 
+            "system_prompt.json"
+        )
+
+    def _load_system_prompt(self):
+        """Loads the system prompt from the external JSON file."""
+        try:
+            with open(self.system_prompt_path, 'r', encoding='utf-8') as f:
+                system_message = json.load(f)
+            logger.info("System prompt loaded from file: %s", self.system_prompt_path)
+            return system_message
+        except Exception as e:
+            logger.error("Error loading system prompt from file: %s", str(e))
+            # Fallback to default system prompt
+            return {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "system",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "You are an AI assistant for job interviews, specialized in questions for software engineers. Respond concisely and structured."
+                    }]
+                }
+            }
 
     async def realtime_session(self):
         """Manages a session for communication via Realtime API."""
@@ -120,17 +149,9 @@ class RealtimeTextThread(QThread):
                 except Exception as e:
                     logger.error("Error sending configuration: " + str(e))
                 
-                system_message = {
-                    "type": "conversation.item.create",
-                    "item": {
-                        "type": "message",
-                        "role": "system",
-                        "content": [{
-                            "type": "input_text",
-                            "text": "You are an AI assistant for job interviews, specialized in questions for software engineers. Respond concisely and structured."
-                        }]
-                    }
-                }
+                # Load system prompt from external file
+                system_message = self._load_system_prompt()
+                
                 try:
                     ws.send(json.dumps(system_message))
                     logger.info("System prompt message sent")
