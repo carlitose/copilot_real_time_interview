@@ -54,6 +54,10 @@ class IntervistaAssistant(QMainWindow):
         self.clear_button = self.central_widget.clear_button
         self.analyze_screenshot_button = self.central_widget.analyze_screenshot_button
         self.save_button = self.central_widget.save_button
+        self.screen_selector_combo = self.central_widget.screen_selector_combo
+        
+        # Popola il menu a tendina con i monitor disponibili
+        self._populate_screen_selector()
         
         # Configure the main window appearance
         self.setWindowTitle("Intervista Assistant")
@@ -64,6 +68,24 @@ class IntervistaAssistant(QMainWindow):
         self.clear_button.clicked.connect(self.clear_text)
         self.analyze_screenshot_button.clicked.connect(self.take_and_send_screenshot)
         self.save_button.clicked.connect(self.save_conversation)
+        
+    def _populate_screen_selector(self):
+        """Popola il menu a tendina con i monitor disponibili."""
+        try:
+            # Aggiungi opzione per schermo intero
+            self.screen_selector_combo.addItem("Schermo Intero", None)
+            
+            # Ottieni i monitor disponibili
+            monitors = self.screenshot_manager.get_monitors()
+            
+            # Aggiungi le opzioni per ogni monitor
+            for i, monitor in enumerate(monitors):
+                display_text = f"Monitor {i+1}: {monitor['width']}x{monitor['height']}"
+                self.screen_selector_combo.addItem(display_text, i)
+                
+            logger.info(f"Menu a tendina popolato con {len(monitors)} monitor")
+        except Exception as e:
+            logger.error(f"Errore durante il popolamento del menu a tendina: {str(e)}")
         
     def toggle_recording(self):
         """Toggle the connection to the model and immediately start recording."""
@@ -300,13 +322,9 @@ class IntervistaAssistant(QMainWindow):
                                     "You need to start a session first before analyzing images.")
                 return
             
-            # Show screen selection dialog and get the selected monitor index
-            selected_monitor = ScreenSelectorDialog.get_selected_monitor(self)
-            
-            # If user cancels the selection, return
-            if selected_monitor is None and selected_monitor != 0:
-                logger.info("Screenshot capture cancelled by user")
-                return
+            # Ottieni l'indice del monitor selezionato dal menu a tendina
+            selected_monitor = self.screen_selector_combo.currentData()
+            logger.info(f"Cattura screenshot del monitor: {selected_monitor}")
                 
             self.showMinimized()
             time.sleep(0.5)
@@ -345,7 +363,7 @@ class IntervistaAssistant(QMainWindow):
                 if self.text_thread and self.text_thread.connected:
                     # Send a shortened version of the response to the realtime thread
                     # This helps the model know what was in the image without having to see it
-                    context_msg = f"[The screenshot I just analyzed showed: {assistant_response[:500]}...]"
+                    context_msg = f"[I've analyzed the screenshot of a coding exercise/technical interview question. Here's what I found: {assistant_response[:500]}... Let me know if you need more specific details or have questions about how to approach this problem.]"
                     success = self.text_thread.send_text(context_msg)
                     if success:
                         logger.info("Image analysis context sent to realtime thread")
@@ -371,7 +389,7 @@ class IntervistaAssistant(QMainWindow):
         # Add system message
         messages.append({
             "role": "system", 
-            "content": "You are a helpful assistant analyzing images in the context of an ongoing conversation. Provide detailed and comprehensive analysis of the images you are shown."
+            "content": "You are a specialized assistant for technical interviews, analyzing screenshots of coding exercises and technical problems. Help the user understand the content of these screenshots in detail. Your analysis should be particularly useful for a candidate during a technical interview or coding assessment."
         })
         
         # Add previous conversation history (excluding the last few entries which might be UI updates)
@@ -382,7 +400,7 @@ class IntervistaAssistant(QMainWindow):
         messages.append({
             "role": "user",
             "content": [
-                {"type": "text", "text": "Please analyze this screenshot in detail. Describe what you see, extract any text, and relate it to our ongoing conversation if relevant."},
+                {"type": "text", "text": "Please analyze this screenshot of a potential technical interview question or coding exercise. Describe what you see in detail, extract any visible code or problem statement, explain the problem if possible, and suggest approaches or ideas to solve it."},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
             ]
         })

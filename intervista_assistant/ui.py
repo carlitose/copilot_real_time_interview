@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTextEdit, QLabel, QPushButton
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTextEdit, QLabel, QPushButton, QComboBox
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 import time
@@ -47,25 +47,38 @@ class IntervistaAssistantUI(QWidget):
         self.splitter.addWidget(self.response_container)
         self.splitter.setSizes([300, 500])
 
-        # Controls layout
+        # Screenshot controls layout
+        self.screenshot_layout = QHBoxLayout()
+        self.screen_selector_label = QLabel("Schermo per screenshot:", self)
+        self.screen_selector_label.setFont(QFont("Arial", 13))
+        self.screen_selector_combo = QComboBox(self)
+        self.screen_selector_combo.setFont(QFont("Arial", 13))
+        self.analyze_screenshot_button = QPushButton("Analyze Screenshot", self)
+        self.analyze_screenshot_button.setFont(QFont("Arial", 13))
+        
+        # Add screenshot controls to layout
+        self.screenshot_layout.addWidget(self.screen_selector_label)
+        self.screenshot_layout.addWidget(self.screen_selector_combo)
+        self.screenshot_layout.addWidget(self.analyze_screenshot_button)
+        self.screenshot_layout.addStretch(1)  # Add stretch to align controls to the left
+
+        # Main controls layout
         self.controls_layout = QHBoxLayout()
         self.record_button = QPushButton("Start Session", self)
         self.record_button.setFont(QFont("Arial", 13))
         self.clear_button = QPushButton("Clear", self)
         self.clear_button.setFont(QFont("Arial", 13))
-        self.analyze_screenshot_button = QPushButton("Analyze Screenshot", self)
-        self.analyze_screenshot_button.setFont(QFont("Arial", 13))
         self.save_button = QPushButton("Save Conversation", self)
         self.save_button.setFont(QFont("Arial", 13))
 
         # Add controls to layout
         self.controls_layout.addWidget(self.record_button)
         self.controls_layout.addWidget(self.clear_button)
-        self.controls_layout.addWidget(self.analyze_screenshot_button)
         self.controls_layout.addWidget(self.save_button)
 
-        # Add splitter and controls layout to main layout
+        # Add splitter, screenshot layout, and controls layout to main layout
         self.main_layout.addWidget(self.splitter)
+        self.main_layout.addLayout(self.screenshot_layout)
         self.main_layout.addLayout(self.controls_layout)
 
         # Optional: Set a margin or spacing if desired
