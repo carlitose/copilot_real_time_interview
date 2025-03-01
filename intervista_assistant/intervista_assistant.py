@@ -18,22 +18,22 @@ from .realtime_text_thread import RealtimeTextThread
 from .utils import ScreenshotManager
 from .ui import IntervistaAssistantUI
 
-# Configurazione logging
+# Logging configuration
 logging.basicConfig(level=logging.INFO, 
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     filename='app.log')
 logger = logging.getLogger(__name__)
 
 class IntervistaAssistant(QMainWindow):
-    """Applicazione principale per l'assistente di interviste."""
+    """Main application for the interview assistant."""
     
     def __init__(self):
         super().__init__()
         load_dotenv()
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
-            QMessageBox.critical(self, "Errore API Key", 
-                                 "API Key OpenAI non trovata. Imposta la variabile d'ambiente OPENAI_API_KEY.")
+            QMessageBox.critical(self, "API Key Error", 
+                                 "OpenAI API Key not found. Set the environment variable OPENAI_API_KEY.")
             sys.exit(1)
         self.client = OpenAI(api_key=api_key)
         self.recording = False
@@ -42,11 +42,11 @@ class IntervistaAssistant(QMainWindow):
         self.shutdown_in_progress = False
         self.screenshot_manager = ScreenshotManager()
         
-        # Inizializza l'UI utilizzando la classe IntervistaAssistantUI
+        # Initialize the UI using the IntervistaAssistantUI class
         self.central_widget = IntervistaAssistantUI(self)
         self.setCentralWidget(self.central_widget)
         
-        # Ottieni riferimenti ai widget dell'UI
+        # Get references to the UI widgets
         self.transcription_text = self.central_widget.transcription_text
         self.response_text = self.central_widget.response_text
         self.record_button = self.central_widget.record_button
@@ -55,11 +55,11 @@ class IntervistaAssistant(QMainWindow):
         self.share_button = self.central_widget.share_button
         self.save_button = self.central_widget.save_button
         
-        # Configura l'aspetto della finestra principale
-        self.setWindowTitle("Assistente Intervista Software Engineer")
+        # Configure the main window appearance
+        self.setWindowTitle("Interview Assistant Software Engineer")
         self.setGeometry(100, 100, 1200, 800)
         
-        # Connette i segnali agli slot
+        # Connect signals to slots
         self.record_button.clicked.connect(self.toggle_recording)
         self.clear_button.clicked.connect(self.clear_text)
         self.screenshot_button.clicked.connect(self.take_screenshot)
@@ -67,10 +67,10 @@ class IntervistaAssistant(QMainWindow):
         self.save_button.clicked.connect(self.save_conversation)
         
     def toggle_recording(self):
-        """Attiva o disattiva la connessione al modello e inizia immediatamente la registrazione."""
+        """Toggle the connection to the model and immediately start recording."""
         if not self.recording:
             self.recording = True
-            self.record_button.setText("Termina Sessione")
+            self.record_button.setText("End Session")
             self.record_button.setStyleSheet("background-color: #ff5555;")
             
             self.text_thread = RealtimeTextThread()
@@ -81,7 +81,7 @@ class IntervistaAssistant(QMainWindow):
             self.text_thread.finished.connect(self.recording_finished)
             self.text_thread.start()
             
-            # Avvio automatico della registrazione subito dopo inizializzazione della sessione
+            # Automatically start recording immediately after session initialization
             while not self.text_thread.connected:
                 time.sleep(0.1)
             self.text_thread.start_recording()
@@ -90,34 +90,34 @@ class IntervistaAssistant(QMainWindow):
                 return
                 
             self.shutdown_in_progress = True
-            self.record_button.setText("Terminazione in corso...")
+            self.record_button.setText("Terminating...")
             self.record_button.setEnabled(False)
             
             if hasattr(self.text_thread, 'recording') and self.text_thread.recording:
                 try:
                     self.text_thread.stop_recording()
                 except Exception as e:
-                    logger.error("Errore durante lo stop_recording: " + str(e))
+                    logger.error("Error during stop_recording: " + str(e))
             
             try:
                 if self.text_thread:
                     self.text_thread.stop()
                     self.text_thread.wait(2000)
             except Exception as e:
-                logger.error("Errore durante la terminazione della sessione: " + str(e))
+                logger.error("Error during session termination: " + str(e))
                 self.recording_finished()
     
     def recording_finished(self):
-        """Chiamato quando il thread è terminato."""
+        """Called when the thread has finished."""
         self.recording = False
         self.shutdown_in_progress = False
-        self.record_button.setText("Inizia Sessione")
+        self.record_button.setText("Start Session")
         self.record_button.setStyleSheet("")
         self.record_button.setEnabled(True)
-        self.transcription_text.append("\n[Sessione terminata]")
+        self.transcription_text.append("\n[Session ended]")
     
     def update_connection_status(self, connected):
-        """Aggiorna l'interfaccia in base allo stato della connessione."""
+        """Update the interface based on the connection status."""
         if connected:
             self.record_button.setStyleSheet("background-color: #55aa55;")
         else:
@@ -125,15 +125,15 @@ class IntervistaAssistant(QMainWindow):
                 self.record_button.setStyleSheet("background-color: #ff5555;")
     
     def update_transcription(self, text):
-        """Aggiorna il campo della trascrizione."""
-        if text == "Registrazione in corso...":
+        """Update the transcription field."""
+        if text == "Recording in progress...":
             self.transcription_text.setText(text)
             return
         
-        if text.startswith('\n[Audio processato alle'):
+        if text.startswith('\n[Audio processed at'):
             formatted_timestamp = f"\n--- {text.strip()} ---\n"
             current_text = self.transcription_text.toPlainText()
-            if current_text == "Registrazione in corso...":
+            if current_text == "Recording in progress...":
                 self.transcription_text.setText(formatted_timestamp)
             else:
                 self.transcription_text.append(formatted_timestamp)
@@ -144,12 +144,12 @@ class IntervistaAssistant(QMainWindow):
             self.transcription_text.verticalScrollBar().maximum()
         )
         
-        if text != "Registrazione in corso...":
+        if text != "Recording in progress...":
             if not self.chat_history or self.chat_history[-1]["role"] != "user" or self.chat_history[-1]["content"] != text:
                 self.chat_history.append({"role": "user", "content": text})
     
     def update_response(self, text):
-        """Aggiorna il campo della risposta con formattazione markdown."""
+        """Update the response field with markdown formatting."""
         if not text:
             return
         current_time = datetime.now().strftime("%H:%M:%S")
@@ -215,7 +215,7 @@ class IntervistaAssistant(QMainWindow):
             }
         </style>
         """
-        header = f'<div class="response-header">--- Risposta alle {current_time} ---</div>'
+        header = f'<div class="response-header">--- Response at {current_time} ---</div>'
         
         def process_code_blocks(text):
             import re
@@ -286,49 +286,49 @@ class IntervistaAssistant(QMainWindow):
             self.chat_history.append({"role": "assistant", "content": text})
         elif self.chat_history and self.chat_history[-1]["role"] == "assistant":
             previous_content = self.chat_history[-1]["content"]
-            self.chat_history[-1]["content"] = f"{previous_content}\n--- Risposta alle {current_time} ---\n{text}"
+            self.chat_history[-1]["content"] = f"{previous_content}\n--- Response at {current_time} ---\n{text}"
     
     def take_screenshot(self):
-        """Cattura e salva uno screenshot."""
+        """Capture and save a screenshot."""
         try:
             self.showMinimized()
             time.sleep(0.5)
             screenshot_path = self.screenshot_manager.take_screenshot()
             self.showNormal()
             QMessageBox.information(self, "Screenshot", 
-                                      f"Screenshot salvato in: {screenshot_path}")
+                                      f"Screenshot saved in: {screenshot_path}")
         except Exception as e:
-            error_msg = f"Errore durante la cattura dello screenshot: {str(e)}"
+            error_msg = f"Error during screenshot capture: {str(e)}"
             self.show_error(error_msg)
             logger.error(error_msg)
     
     def share_screenshot(self):
-        """Cattura uno screenshot e offre opzioni per condividerlo."""
+        """Capture a screenshot and offer options to share it."""
         try:
             self.showMinimized()
             time.sleep(0.5)
             screenshot_path = self.screenshot_manager.take_screenshot()
             self.showNormal()
             self.screenshot_manager.copy_to_clipboard(screenshot_path)
-            QMessageBox.information(self, "Screenshot Condiviso", 
-                                      f"Screenshot salvato in: {screenshot_path}\n\nIl percorso è stato copiato negli appunti.")
+            QMessageBox.information(self, "Screenshot Shared", 
+                                      f"Screenshot saved in: {screenshot_path}\n\nThe path has been copied to the clipboard.")
         except Exception as e:
-            error_msg = f"Errore durante la condivisione dello screenshot: {str(e)}"
+            error_msg = f"Error during screenshot sharing: {str(e)}"
             self.show_error(error_msg)
             logger.error(error_msg)
     
     def clear_text(self):
-        """Pulisce i campi di testo."""
+        """Clear the text fields."""
         self.transcription_text.clear()
         self.response_text.clear()
         self.chat_history = []
     
     def save_conversation(self):
-        """Salva la conversazione in un file JSON."""
+        """Save the conversation to a JSON file."""
         try:
             options = QFileDialog.Options()
             filename, _ = QFileDialog.getSaveFileName(
-                self, "Salva Conversazione", "", 
+                self, "Save Conversation", "", 
                 "JSON Files (*.json);;Text Files (*.txt);;All Files (*)", 
                 options=options)
             
@@ -341,35 +341,35 @@ class IntervistaAssistant(QMainWindow):
                 }
                 with open(filename, 'w', encoding='utf-8') as f:
                     json.dump(conversation_data, f, ensure_ascii=False, indent=4)
-                QMessageBox.information(self, "Salvataggio Completato", 
-                                          f"Conversazione salvata in: {filename}")
+                QMessageBox.information(self, "Save Completed", 
+                                          f"Conversation saved in: {filename}")
         except Exception as e:
-            error_msg = f"Errore durante il salvataggio: {str(e)}"
+            error_msg = f"Error during save: {str(e)}"
             self.show_error(error_msg)
             logger.error(error_msg)
     
     def show_error(self, message):
-        """Mostra un messaggio di errore."""
+        """Show an error message."""
         if "buffer too small" in message or "Conversation already has an active response" in message:
-            logger.warning(f"Errore ignorato (solo log): {message}")
+            logger.warning(f"Ignored error (log only): {message}")
         else:
-            QMessageBox.critical(self, "Errore", message)
+            QMessageBox.critical(self, "Error", message)
     
     def closeEvent(self, event):
-        """Gestisce la chiusura dell'applicazione."""
+        """Handle application closure."""
         if self.recording and self.text_thread:
-            self.transcription_text.append("\n[Chiusura dell'applicazione in corso...]")
+            self.transcription_text.append("\n[Application closing...]")
             try:
                 self.text_thread.stop()
                 self.text_thread.wait(2000)
             except Exception as e:
-                logger.error("Errore durante la chiusura dell'applicazione: " + str(e))
+                logger.error("Error during application closure: " + str(e))
         event.accept()
     
     def toggle_speaking(self):
-        """Attiva o disattiva la registrazione vocale."""
+        """Toggle voice recording."""
         if not self.recording or not self.text_thread or not self.text_thread.connected:
-            self.show_error("Non sei connesso. Inizia prima una sessione.")
+            self.show_error("You are not connected. Start a session first.")
             return
         if not hasattr(self.text_thread, 'recording') or not self.text_thread.recording:
             self.text_thread.start_recording()
@@ -377,6 +377,6 @@ class IntervistaAssistant(QMainWindow):
             self.text_thread.stop_recording()
     
     def stop_recording(self):
-        """Metodo preservato per compatibilità (la gestione dello stop avviene in toggle_recording)."""
-        logger.info("IntervistaAssistant: Fermando la registrazione")
+        """Method preserved for compatibility (stop handling is done in toggle_recording)."""
+        logger.info("IntervistaAssistant: Stopping recording")
         pass 

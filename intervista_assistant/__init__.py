@@ -1,11 +1,11 @@
 """
-Intervista Assistant - Un'applicazione per supportare le interviste tecniche per sviluppatori software.
+Intervista Assistant - An application to support technical interviews for software developers.
 
-Utilizza le API OpenAI per trascrivere l'audio e generare risposte a domande tecniche.
+Uses OpenAI APIs to transcribe audio and generate responses to technical questions.
 """
 
 __version__ = "0.1.0"
 
 """
-Pacchetto per l'applicazione Intervista Assistant.
+Package for the Intervista Assistant application.
 """ 

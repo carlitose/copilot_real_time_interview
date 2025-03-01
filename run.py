@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Script di avvio per Intervista Assistant.
-Questo script esegue l'applicazione dalla directory principale.
+Startup script for Intervista Assistant.
+This script runs the application from the main directory.
 """
 
 import os
@@ -10,7 +10,7 @@ import logging
 
 if __name__ == "__main__":
     try:
-        # Configura il logging
+        # Configure logging
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -21,19 +21,19 @@ if __name__ == "__main__":
         )
         logger = logging.getLogger(__name__)
         
-        # Messaggio di avvio
-        logger.info("Avvio di Intervista Assistant...")
+        # Startup message
+        logger.info("Starting Intervista Assistant...")
         
-        # Importa ed esegui l'applicazione
+        # Import and run the application
         from intervista_assistant.main import main
         main()
         
     except ImportError as e:
-        print(f"Errore di importazione: {e}")
-        print("Assicurati di aver installato tutte le dipendenze richieste.")
-        print("Esegui: pip install -r requirements.txt")
+        print(f"Import error: {e}")
+        print("Ensure all required dependencies are installed.")
+        print("Run: pip install -r requirements.txt")
         sys.exit(1)
         
     except Exception as e:
-        print(f"Errore durante l'avvio: {e}")
+        print(f"Error during startup: {e}")
         sys.exit(1) 

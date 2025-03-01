@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Launcher per Intervista Assistant.
-Consente l'esecuzione dell'applicazione dalla directory principale.
+Launcher for Intervista Assistant.
+Allows running the application from the main directory.
 """
 
 import os
 import sys
 from pathlib import Path
 
-# Aggiungi la directory principale al path
+# Add the main directory to the path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 if __name__ == "__main__":
-    # Importa e avvia l'applicazione
+    # Import and start the application
     from intervista_assistant.main import main
     
-    # Esegui l'applicazione
+    # Run the application
     main() 
