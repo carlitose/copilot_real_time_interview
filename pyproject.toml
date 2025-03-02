@@ -23,8 +23,15 @@ textual = "^2.1.2"
 pydub = "^0.25.1"
 markdown = "^3.7"
 mss = "^9.0.1"
+fastapi = "^0.115.11"
+uvicorn = "^0.34.0"
+websockets = "^15.0"
+python-multipart = "^0.0.20"
 
 
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+start-api = "intervista_assistant.api_launcher:main"

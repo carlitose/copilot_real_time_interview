@@ -1,6 +1,84 @@
-# Interview Assistant
+# Intervista Assistant
 
-An assistant for job interviews for software developers that uses OpenAI's GPT-4o Audio.
+Un assistente AI per colloqui tecnici con frontend React/Next.js.
+
+## Struttura del progetto
+
+Il progetto è organizzato in due parti principali:
+
+1. **Backend API** (Python/FastAPI): Gestisce la logica dell'applicazione e le connessioni con l'API di OpenAI
+2. **Frontend** (React/Next.js): Interfaccia utente moderna e reattiva
+
+## Prerequisiti
+
+- Python 3.8+
+- [Poetry](https://python-poetry.org/docs/#installation) per la gestione delle dipendenze Python
+- Node.js 18+
+- npm o yarn
+- Un account OpenAI con una chiave API valida
+
+## Configurazione
+
+### Backend (Python)
+
+1. Clonare il repository
+2. Installare le dipendenze con Poetry:
+   ```bash
+   poetry install
+   ```
+3. Creare un file `.env` nella directory principale con il seguente contenuto:
+   ```
+   OPENAI_API_KEY=your_openai_api_key_here
+   ```
+
+### Frontend (Next.js)
+
+1. Accedere alla directory del frontend:
+   ```bash
+   cd frontend
+   ```
+2. Installare le dipendenze:
+   ```bash
+   npm install
+   # oppure
+   yarn install
+   ```
+3. Creare un file `.env.local` con il seguente contenuto:
+   ```
+   NEXT_PUBLIC_API_URL=http://localhost:8000
+   ```
+
+## Avvio dell'applicazione
+
+### Avvio del Backend API
+
+```bash
+# Dalla directory principale del progetto
+poetry run start-api
+# oppure
+poetry run python -m intervista_assistant.api_launcher
+```
+
+Il server API sarà disponibile all'indirizzo `http://localhost:8000`.
+
+### Avvio del Frontend Next.js
+
+```bash
+# Dalla directory frontend
+npm run dev
+# oppure
+yarn dev
+```
+
+L'applicazione frontend sarà disponibile all'indirizzo `http://localhost:3000`.
+
+## Funzionalità
+
+- Invio di messaggi testuali
+- Registrazione e trascrizione audio
+- Analisi di screenshot
+- Supporto per analisi avanzata ("Think")
+- Interfaccia utente moderna e reattiva
 
 ## Description
 
