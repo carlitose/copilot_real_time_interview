@@ -64,6 +64,10 @@ class IntervistaAssistant(QMainWindow):
         self.central_widget.analyze_screenshot_button.clicked.connect(self.take_and_send_screenshot)
         self.central_widget.think_button.clicked.connect(self.show_think_dialog)
         
+        # Connect text input signals
+        self.central_widget.send_button.clicked.connect(self.send_text_message)
+        self.central_widget.text_input_field.returnPressed.connect(self.send_text_message)
+        
         # Populate the screen selector combo box
         self._populate_screen_selector()
         
@@ -96,6 +100,10 @@ class IntervistaAssistant(QMainWindow):
             self.record_button.setText("End Session")
             self.record_button.setStyleSheet("background-color: #ff5555;")
             
+            # Temporarily disable text input controls
+            self.central_widget.text_input_field.setEnabled(False)
+            self.central_widget.send_button.setEnabled(False)
+            
             self.text_thread = RealtimeTextThread()
             self.text_thread.transcription_signal.connect(self.update_transcription)
             self.text_thread.response_signal.connect(self.update_response)
@@ -115,6 +123,10 @@ class IntervistaAssistant(QMainWindow):
             self.shutdown_in_progress = True
             self.record_button.setText("Terminating...")
             self.record_button.setEnabled(False)
+            
+            # Disable text input controls
+            self.central_widget.text_input_field.setEnabled(False)
+            self.central_widget.send_button.setEnabled(False)
             
             if hasattr(self.text_thread, 'recording') and self.text_thread.recording:
                 try:
@@ -143,9 +155,15 @@ class IntervistaAssistant(QMainWindow):
         """Update the interface based on the connection status."""
         if connected:
             self.record_button.setStyleSheet("background-color: #55aa55;")
+            # Enable text input field and send button
+            self.central_widget.text_input_field.setEnabled(True)
+            self.central_widget.send_button.setEnabled(True)
         else:
             if self.recording:
                 self.record_button.setStyleSheet("background-color: #ff5555;")
+            # Disable text input field and send button
+            self.central_widget.text_input_field.setEnabled(False)
+            self.central_widget.send_button.setEnabled(False)
     
     def update_transcription(self, text):
         """Update the transcription field."""
@@ -576,6 +594,35 @@ class IntervistaAssistant(QMainWindow):
             error_msg = f"Error in solution handling: {str(e)}"
             self.show_error(error_msg)
             logger.error(error_msg)
+
+    def send_text_message(self):
+        """Sends a text message to the model."""
+        if not self.recording or not self.text_thread or not self.text_thread.connected:
+            self.show_error("You are not connected. Please start a session first.")
+            return
+        
+        # Get text from input field
+        text = self.central_widget.text_input_field.text().strip()
+        
+        # Check that there is text to send
+        if not text:
+            return
+            
+        # Display text in the transcription window
+        current_time = datetime.now().strftime("%H:%M:%S")
+        self.transcription_text.append(f"\n[Text message sent at {current_time}]\n{text}\n")
+        
+        # Update chat history
+        self.chat_history.append({"role": "user", "content": text})
+        
+        # Send text through the realtime thread
+        success = self.text_thread.send_text(text)
+        
+        if not success:
+            self.show_error("Unable to send message. Please try again.")
+        else:
+            # Clear input field
+            self.central_widget.text_input_field.clear()
 
 class ImageAnalysisWorker(QObject):
     """Worker class per l'analisi asincrona delle immagini."""
