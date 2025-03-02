@@ -4,20 +4,17 @@ import os
 import time
 import json
 import logging
-import asyncio
 from datetime import datetime
 import base64
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QMessageBox, QFileDialog)
-from PyQt5.QtCore import Qt, QObject, QThread, pyqtSignal, pyqtSlot
-from PyQt5.QtGui import QFont
+from PyQt5.QtCore import QObject, QThread, pyqtSignal, pyqtSlot
 
 from openai import OpenAI
 from dotenv import load_dotenv
 
 from .realtime_text_thread import RealtimeTextThread
-from .utils import ScreenshotManager, ScreenSelectorDialog
-from .utils.think_process import ThinkProcess
+from .utils import ScreenshotManager
 from .ui import IntervistaAssistantUI
 
 # Logging configuration
