@@ -30,6 +30,8 @@ python-multipart = "^0.0.20"
 flask = "^3.1.0"
 flask-cors = "^5.0.1"
 flask-sock = "^0.7.0"
+python-socketio = "^5.12.1"
+flask-socketio = "^5.5.1"
 
 
 [build-system]

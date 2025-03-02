@@ -4,10 +4,12 @@
  * Provides TypeScript functions to interact with the backend API
  */
 
+import { io, Socket } from 'socket.io-client';
+
 // Base API URL - può essere configurato in base all'ambiente
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/api';
 // Modifichiamo l'URL del WebSocket per assicurarci che corrisponda al backend
-const WS_BASE_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000/api';
+const WS_BASE_URL = process.env.NEXT_PUBLIC_WS_URL || 'http://127.0.0.1:8000';
 
 // Tipi per le risposte dell'API
 
@@ -72,6 +74,13 @@ export interface AudioStreamControl {
   isPaused: boolean;
 }
 
+// Aggiungi la dichiarazione del tipo per webkitAudioContext
+declare global {
+  interface Window {
+    webkitAudioContext: typeof AudioContext;
+  }
+}
+
 // Client API per interagire con il backend
 
 /**
@@ -80,12 +89,57 @@ export interface AudioStreamControl {
 export class IntervistaApiClient {
   private baseUrl: string;
   private wsBaseUrl: string;
+  private socket: Socket | null = null;
   private eventSource: EventSource | null = null;
-  private audioConnections: Map<string, { ws: WebSocket; stream: MediaStream | null }> = new Map();
+  private audioConnections: Map<string, { stream: MediaStream | null }> = new Map();
 
   constructor(baseUrl: string = API_BASE_URL, wsBaseUrl: string = WS_BASE_URL) {
     this.baseUrl = baseUrl;
     this.wsBaseUrl = wsBaseUrl;
+    this.init();
+  }
+
+  init() {
+    if (this.socket) {
+      if (this.socket.connected) {
+        console.log("Socket.IO già connesso, riutilizzo la connessione esistente");
+        return;
+      } else {
+        console.log("Socket.IO istanza esistente ma disconnessa, chiudo e ricreo");
+        this.socket.close();
+        this.socket = null;
+      }
+    }
+    
+    console.log("Inizializzazione Socket.IO con URL:", WS_BASE_URL);
+    
+    // Inizializza Socket.IO con riconnessione automatica
+    this.socket = io(WS_BASE_URL, {
+      reconnectionDelayMax: 10000,
+      reconnection: true,
+      reconnectionAttempts: 10,
+      transports: ['websocket', 'polling'],
+      path: '/socket.io',
+      timeout: 20000,
+      forceNew: true
+    });
+
+    // Gestione degli eventi Socket.IO
+    this.socket.on('connect', () => {
+      console.log('Socket.IO connected! ID:', this.socket?.id);
+    });
+    
+    this.socket.on('connect_error', (error: any) => {
+      console.error('Socket.IO connection error:', error);
+    });
+    
+    this.socket.on('error', (error: any) => {
+      console.error('Socket.IO error:', error);
+    });
+    
+    this.socket.on('disconnect', (reason: string) => {
+      console.log('Socket.IO disconnected:', reason);
+    });
   }
 
   /**
@@ -121,20 +175,41 @@ export class IntervistaApiClient {
    */
   async startSession(sessionId: string): Promise<boolean> {
     try {
-      const response = await fetch(`${this.baseUrl}/sessions/${sessionId}/start`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
+      // Creiamo un AbortController per il timeout, più compatibile con tutti i browser
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 secondi di timeout
+      
+      try {
+        const response = await fetch(`${this.baseUrl}/sessions/${sessionId}/start`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          // Usiamo il signal dell'AbortController invece di AbortSignal.timeout
+          signal: controller.signal
+        });
+        
+        // Puliamo il timeout
+        clearTimeout(timeoutId);
 
-      const data: ApiResponse = await response.json();
+        const data: ApiResponse = await response.json();
 
-      if (!data.success) {
-        throw new Error(data.error || 'Failed to start session');
+        if (!data.success) {
+          throw new Error(data.error || 'Failed to start session');
+        }
+
+        return true;
+      } catch (error: any) {
+        // Puliamo il timeout anche in caso di errore
+        clearTimeout(timeoutId);
+        
+        // Se è un errore di abort, lo trasformiamo in un errore di timeout
+        if (error.name === 'AbortError') {
+          throw new Error('Timeout while connecting to the server');
+        }
+        
+        throw error;
       }
-
-      return true;
     } catch (error) {
       console.error('Error starting session:', error);
       throw error;
@@ -225,64 +300,124 @@ export class IntervistaApiClient {
     // Chiudi eventuali connessioni esistenti
     this.closeEventStream();
 
-    // Crea una nuova EventSource per SSE
-    this.eventSource = new EventSource(`${this.baseUrl}/sessions/${sessionId}/stream`);
-    let isConnectionClosed = false; // Flag per monitorare se la connessione è stata chiusa volontariamente
+    let isConnectionClosed = false;
+    let reconnectAttempts = 0;
+    const MAX_RECONNECT_ATTEMPTS = 3;
+    let hasReceived404 = false; // Flag per tracciare errori 404
 
-    // Registra gli handler per i vari tipi di eventi
-    if (callbacks.onTranscription) {
-      this.eventSource.addEventListener('transcription', (event) => {
-        try {
-          const data: TranscriptionUpdate = JSON.parse(event.data);
-          callbacks.onTranscription?.(data);
-        } catch (e) {
-          console.error('Error parsing transcription data:', e);
-        }
-      });
-    }
+    const setupEventSource = () => {
+      if (isConnectionClosed || hasReceived404) return;
 
-    if (callbacks.onResponse) {
-      this.eventSource.addEventListener('response', (event) => {
-        try {
-          const data: ResponseUpdate = JSON.parse(event.data);
-          callbacks.onResponse?.(data);
-        } catch (e) {
-          console.error('Error parsing response data:', e);
-        }
-      });
-    }
+      try {
+        console.log('Setting up new EventSource connection...');
+        this.eventSource = new EventSource(`${this.baseUrl}/sessions/${sessionId}/stream`);
 
-    if (callbacks.onError) {
-      this.eventSource.addEventListener('error', (event) => {
-        try {
-          const data: ErrorUpdate = JSON.parse((event as any).data || '{}');
-          callbacks.onError?.(data);
-        } catch (e) {
-          console.error('Error parsing error data:', e);
+        // Registra gli handler per i vari tipi di eventi
+        if (callbacks.onTranscription) {
+          this.eventSource.addEventListener('transcription', (event) => {
+            if (isConnectionClosed) return;
+            try {
+              const data: TranscriptionUpdate = JSON.parse(event.data);
+              callbacks.onTranscription?.(data);
+            } catch (e) {
+              console.error('Error parsing transcription data:', e);
+            }
+          });
         }
-      });
-    }
 
-    // Aggiungi un event listener per errori di connessione
-    this.eventSource.onerror = (error) => {
-      console.error('SSE connection error:', error);
-      
-      // Informa il chiamante dell'errore di connessione
-      callbacks.onConnectionError?.(error);
-      
-      // Se la connessione è stata chiusa volontariamente, non tentare di riconnettersi
-      if (isConnectionClosed) {
-        // Chiudi definitivamente l'EventSource per evitare riconnessioni automatiche
-        if (this.eventSource) {
-          this.eventSource.close();
-          this.eventSource = null;
+        if (callbacks.onResponse) {
+          this.eventSource.addEventListener('response', (event) => {
+            if (isConnectionClosed) return;
+            try {
+              const data: ResponseUpdate = JSON.parse(event.data);
+              callbacks.onResponse?.(data);
+            } catch (e) {
+              console.error('Error parsing response data:', e);
+            }
+          });
         }
+
+        if (callbacks.onError) {
+          this.eventSource.addEventListener('error', (event) => {
+            if (isConnectionClosed) return;
+            try {
+              const data: ErrorUpdate = JSON.parse((event as any).data || '{}');
+              callbacks.onError?.(data);
+            } catch (e) {
+              console.error('Error parsing error data:', e);
+            }
+          });
+        }
+
+        // Gestione errori di connessione
+        this.eventSource.onerror = async (error) => {
+          console.error('SSE connection error:', error);
+          
+          if (isConnectionClosed) {
+            this.closeEventStream();
+            return;
+          }
+
+          // Verifica se la sessione esiste ancora
+          try {
+            const response = await fetch(`${this.baseUrl}/sessions/${sessionId}/status`, {
+              method: 'GET',
+              headers: { 'Content-Type': 'application/json' }
+            });
+
+            if (response.status === 404) {
+              console.log('Session no longer exists, stopping reconnection attempts');
+              hasReceived404 = true;
+              this.closeEventStream();
+              callbacks.onConnectionError?.(new Event('sessionClosed'));
+              return;
+            }
+          } catch (checkError) {
+            console.error('Error checking session status:', checkError);
+          }
+
+          callbacks.onConnectionError?.(error);
+          
+          // Tentativo di riconnessione solo se non abbiamo ricevuto un 404
+          if (!hasReceived404 && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+            reconnectAttempts++;
+            console.log(`SSE reconnection attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`);
+            
+            // Aumenta il delay tra i tentativi (exponential backoff)
+            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 5000);
+            
+            setTimeout(() => {
+              if (!isConnectionClosed && !hasReceived404) {
+                this.closeEventStream();
+                setupEventSource();
+              }
+            }, delay);
+          } else {
+            console.error('Max SSE reconnection attempts reached or session closed');
+            this.closeEventStream();
+          }
+        };
+
+        // Reset del contatore di tentativi quando la connessione ha successo
+        this.eventSource.onopen = () => {
+          console.log('SSE connection established successfully');
+          reconnectAttempts = 0;
+        };
+
+      } catch (error) {
+        console.error('Error setting up EventSource:', error);
+        callbacks.onConnectionError?.(new Event('error'));
       }
     };
 
+    // Avvia la connessione SSE
+    setupEventSource();
+
     // Restituisci la funzione per chiudere lo stream
     return () => {
+      console.log('Closing SSE connection voluntarily');
       isConnectionClosed = true;
+      hasReceived404 = true; // Impediamo ulteriori tentativi di riconnessione
       this.closeEventStream();
     };
   }
@@ -292,8 +427,14 @@ export class IntervistaApiClient {
    */
   private closeEventStream(): void {
     if (this.eventSource) {
-      this.eventSource.close();
-      this.eventSource = null;
+      try {
+        console.log('Closing EventSource connection');
+        this.eventSource.close();
+      } catch (error) {
+        console.error('Error closing EventSource:', error);
+      } finally {
+        this.eventSource = null;
+      }
     }
   }
 
@@ -436,6 +577,27 @@ export class IntervistaApiClient {
   }
 
   /**
+   * Ferma lo streaming audio per una sessione
+   * @param sessionId - ID della sessione
+   */
+  private stopAudioStream(sessionId: string): void {
+    const connection = this.audioConnections.get(sessionId);
+    if (connection) {
+      // Ferma lo stream del microfono
+      if (connection.stream) {
+        try {
+          connection.stream.getTracks().forEach(track => track.stop());
+        } catch (err) {
+          console.error('Error stopping audio tracks:', err);
+        }
+      }
+      
+      // Rimuovi la connessione dalla mappa
+      this.audioConnections.delete(sessionId);
+    }
+  }
+
+  /**
    * Inizia lo streaming audio dal microfono verso il backend
    * @param sessionId - ID della sessione
    * @returns Promise con il controllo dello streaming
@@ -445,190 +607,162 @@ export class IntervistaApiClient {
     this.stopAudioStream(sessionId);
 
     try {
-      // Richiedi l'accesso al microfono
+      console.log("Tentativo di avvio streaming audio per la sessione:", sessionId);
+      
+      // Verifica che la sessione esista prima di iniziare lo streaming
+      try {
+        // Prima, assicuriamoci che la sessione sia avviata
+        console.log("Avvio della sessione prima dello streaming audio...");
+        const startResponse = await fetch(`${this.baseUrl}/sessions/${sessionId}/start`, {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'Accept': 'application/json' 
+          },
+          mode: 'cors'
+        });
+        
+        if (!startResponse.ok) {
+          console.warn(`Risposta non ok dall'avvio sessione: ${startResponse.status}`);
+          // Non interrompiamo il flusso qui, potrebbe essere già avviata
+        } else {
+          console.log("Sessione avviata con successo");
+        }
+        
+        // Ora verifichiamo lo stato
+        const statusResponse = await fetch(`${this.baseUrl}/sessions/${sessionId}/status`, {
+          method: 'GET',
+          headers: { 
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          mode: 'cors',
+        });
+
+        console.log("Risposta status:", statusResponse.status);
+        
+        if (statusResponse.status === 404) {
+          throw new Error('Session not found');
+        }
+        
+        // Verifica la risposta
+        const data = await statusResponse.json();
+        console.log("Dati risposta status:", data);
+        
+        if (!data.success) {
+          throw new Error(data.error || 'Error checking session status');
+        }
+        
+        // Verifichiamo che la registrazione sia effettivamente attiva
+        if (!data.status?.is_recording) {
+          console.warn("La sessione esiste ma non è in registrazione, riprova...");
+          // Tenta di avviare nuovamente
+          await fetch(`${this.baseUrl}/sessions/${sessionId}/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            mode: 'cors'
+          });
+        }
+      } catch (error) {
+        console.error("Errore durante il controllo dello stato della sessione:", error);
+        // Continuiamo comunque, potrebbe essere solo un problema dell'endpoint status
+      }
+
+      // Connetti Socket.IO se non è già connesso
+      if (!this.socket) {
+        this.init();
+      }
+      
+      if (!this.socket?.connected) {
+        console.log("Tentativo di connessione Socket.IO...");
+        await new Promise<void>((resolve, reject) => {
+          if (!this.socket) {
+            this.init();
+            if (!this.socket) return reject(new Error('Socket not initialized'));
+          }
+          
+          const timeout = setTimeout(() => {
+            reject(new Error('Socket connection timeout'));
+          }, 10000); // Aumentiamo il timeout a 10 secondi
+
+          this.socket.once('connect', () => {
+            clearTimeout(timeout);
+            console.log("Socket.IO connesso con successo");
+            resolve();
+          });
+
+          this.socket.connect();
+        });
+      } else {
+        console.log("Socket.IO già connesso");
+      }
+
+      // Richiedi l'accesso al microfono con parametri ottimizzati
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
-          sampleRate: 16000, // Importante per la compatibilità con OpenAI
+          channelCount: 1,
+          sampleRate: 16000,
         },
         video: false,
       });
 
-      // Crea un AudioContext per elaborare i dati audio
-      const audioContext = new AudioContext({ sampleRate: 16000 });
+      // Crea un AudioContext con sample rate fisso
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
       const source = audioContext.createMediaStreamSource(stream);
       
-      // NOTA: ScriptProcessorNode è deprecato, ma è ancora ampiamente supportato.
-      // In futuro verrà sostituito con AudioWorkletNode
-      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      // Carica l'AudioWorklet
+      await audioContext.audioWorklet.addModule('/audio-processor.js');
+      const processor = new AudioWorkletNode(audioContext, 'audio-processor');
       
-      // Flag di pausa
       let isPaused = false;
-      let isReconnecting = false;
-      let reconnectionAttempts = 0;
-      const MAX_RECONNECTION_ATTEMPTS = 3;
-      let ws: WebSocket | null = null;
-      let isClosingVoluntarily = false; // Flag per chiusura volontaria
-      
-      // Funzione per creare e connettere il WebSocket
-      const connectWebSocket = (): Promise<WebSocket> => {
-        return new Promise((resolve, reject) => {
-          // Verifica se il sessionId è valido
-          if (!sessionId) {
-            reject(new Error('Session ID is required'));
-            return;
-          }
-
-          // Reset della flag per la chiusura volontaria
-          isClosingVoluntarily = false;
-
-          // Crea una nuova connessione WebSocket
-          ws = new WebSocket(`${this.wsBaseUrl}/sessions/${sessionId}/audio`);
-          
-          // Timeout per la connessione (5 secondi)
-          const connectionTimeout = setTimeout(() => {
-            if (ws && ws.readyState !== WebSocket.OPEN) {
-              ws.close();
-              reject(new Error('WebSocket connection timeout'));
-            }
-          }, 5000);
-          
-          // Handler per l'apertura della connessione
-          const onOpen = () => {
-            console.log('WebSocket audio connection established');
-            clearTimeout(connectionTimeout);
-            reconnectionAttempts = 0;
-            resolve(ws as WebSocket);
-            
-            // Rimuovi gli eventi dopo la connessione
-            if (ws) {
-              ws.removeEventListener('open', onOpen);
-              ws.removeEventListener('error', onError);
-            }
-          };
-          
-          // Handler per gli errori di connessione
-          const onError = (event: Event) => {
-            console.error('WebSocket connection error:', event);
-            clearTimeout(connectionTimeout);
-            reject(new Error('Failed to establish WebSocket connection'));
-            
-            // Rimuovi gli eventi dopo l'errore
-            if (ws) {
-              ws.removeEventListener('open', onOpen);
-              ws.removeEventListener('error', onError);
-            }
-          };
-          
-          // Aggiungi gli handler alla connessione
-          ws.addEventListener('open', onOpen);
-          ws.addEventListener('error', onError);
-          
-          // Handler per la chiusura della connessione
-          ws.addEventListener('close', (event) => {
-            console.log(`WebSocket closed: ${event.code} ${event.reason}`);
-            
-            // Tenta di riconnettersi solo se:
-            // 1. Non è una chiusura volontaria
-            // 2. Non stiamo già tentando di riconnetterci
-            // 3. Non abbiamo raggiunto il numero massimo di tentativi
-            if (!isClosingVoluntarily && !isReconnecting && reconnectionAttempts < MAX_RECONNECTION_ATTEMPTS) {
-              attemptReconnect();
-            } else if (isClosingVoluntarily) {
-              console.log('WebSocket closed voluntarily - not attempting reconnection');
-            }
-          });
-        });
-      };
-      
-      // Funzione per tentare la riconnessione
-      const attemptReconnect = async () => {
-        if (isReconnecting || isClosingVoluntarily) return;
-        
-        isReconnecting = true;
-        reconnectionAttempts++;
-        
-        console.log(`\n[Connection lost. Reconnection attempt ${reconnectionAttempts}/${MAX_RECONNECTION_ATTEMPTS}]`);
-        
-        try {
-          // Attendi un po' prima di riconnetterti (tempo crescente)
-          await new Promise(resolve => setTimeout(resolve, 1000 * reconnectionAttempts));
-          
-          // Chiudi la connessione esistente se aperta
-          if (ws) {
-            ws.close();
-            ws = null;
-          }
-          
-          // Tenta di riconnettersi
-          await connectWebSocket();
-          
-          isReconnecting = false;
-        } catch (error) {
-          isReconnecting = false;
-          
-          if (reconnectionAttempts < MAX_RECONNECTION_ATTEMPTS && !isClosingVoluntarily) {
-            // Ritenta la connessione
-            attemptReconnect();
-          } else {
-            console.error('Failed to reconnect after maximum attempts');
-          }
-        }
-      };
-      
-      // Connetti il WebSocket inizialmente
-      await connectWebSocket();
+      let isActive = true;
       
       // Memorizza la connessione
-      if (ws) {
-        this.audioConnections.set(sessionId, { ws, stream });
-      } else {
-        throw new Error('Failed to establish WebSocket connection');
-      }
+      this.audioConnections.set(sessionId, { stream });
       
-      // Callback di elaborazione audio
-      processor.onaudioprocess = (e) => {
-        // Non inviare audio se in pausa, se il WebSocket non esiste, 
-        // se non è aperto o se stiamo chiudendo volontariamente
-        if (isPaused || !ws || ws.readyState !== WebSocket.OPEN || isClosingVoluntarily) return;
-        
-        // Ottieni i dati audio dal canale sinistro
-        const inputData = e.inputBuffer.getChannelData(0);
-        
-        // Converti in Int16Array (formato richiesto per l'API OpenAI)
-        const audioData = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          // Il formato Float32Array va da -1 a 1, convertiamo in Int16 (-32768 a 32767)
-          audioData[i] = Math.max(-32768, Math.min(32767, Math.floor(inputData[i] * 32768)));
-        }
+      // Gestisci i messaggi dall'AudioWorklet
+      processor.port.onmessage = (event) => {
+        if (!isActive || isPaused || !this.socket?.connected) return;
         
         try {
-          // Invia i dati audio al server come stringa Base64
-          if (ws.readyState === WebSocket.OPEN) {
-            // Converti i dati in Base64 per una compatibilità migliore
-            const buffer = audioData.buffer;
-            const base64data = btoa(
-              new Uint8Array(buffer)
-                .reduce((data, byte) => data + String.fromCharCode(byte), '')
-            );
-            ws.send(base64data);
-          }
+          const audioData = event.data;
+          this.socket.emit('audio_data', sessionId, audioData, (error: any) => {
+            if (error) {
+              console.error('Error sending audio data:', error);
+              if (error.message === 'Session not found') {
+                isActive = false;
+                this.stopAudioStream(sessionId);
+              }
+            }
+          });
         } catch (err) {
-          console.error('Error sending audio data:', err);
+          console.error('Error processing audio data:', err);
         }
       };
       
-      // Collega il processor all'output (necessario per attivare onaudioprocess)
+      // Collega il processor
       source.connect(processor);
       processor.connect(audioContext.destination);
       
-      // Restituisci un'interfaccia per controllare lo streaming
+      // Gestisci gli errori Socket.IO
+      const errorHandler = (error: any) => {
+        console.error('Socket.IO error:', error);
+        if (error.message === 'Session not found' || error.message === 'Session not recording') {
+          isActive = false;
+          this.stopAudioStream(sessionId);
+        }
+      };
+
+      this.socket?.on('error', errorHandler);
+      
+      // Restituisci l'interfaccia di controllo
       return {
         stop: () => {
-          // Imposta la flag per chiusura volontaria prima di fermare lo streaming
-          isClosingVoluntarily = true;
+          isActive = false;
+          this.socket?.off('error', errorHandler);
           this.stopAudioStream(sessionId);
         },
         pause: () => {
@@ -650,39 +784,6 @@ export class IntervistaApiClient {
       throw error;
     }
   }
-  
-  /**
-   * Ferma lo streaming audio per una sessione
-   * @param sessionId - ID della sessione
-   */
-  private stopAudioStream(sessionId: string): void {
-    const connection = this.audioConnections.get(sessionId);
-    if (connection) {
-      // Chiudi la connessione WebSocket
-      if (connection.ws) {
-        try {
-          if (connection.ws.readyState === WebSocket.OPEN || 
-              connection.ws.readyState === WebSocket.CONNECTING) {
-            connection.ws.close();
-          }
-        } catch (err) {
-          console.error('Error closing WebSocket connection:', err);
-        }
-      }
-      
-      // Ferma lo stream del microfono
-      if (connection.stream) {
-        try {
-          connection.stream.getTracks().forEach(track => track.stop());
-        } catch (err) {
-          console.error('Error stopping audio tracks:', err);
-        }
-      }
-      
-      // Rimuovi la connessione dalla mappa
-      this.audioConnections.delete(sessionId);
-    }
-  }
 }
 
 // Esporta un'istanza predefinita per comodità
@@ -691,13 +792,12 @@ export const apiClient = new IntervistaApiClient();
 // Funzioni helper esportate per un accesso più diretto
 
 /**
- * Crea e avvia una nuova sessione
- * @returns Promise con l'ID della sessione
+ * Funzione di supporto per avviare lo streaming audio in una sessione
+ * @param sessionId - ID della sessione
+ * @returns Promise con il controllo dello streaming audio
  */
-export async function createAndStartSession(): Promise<string> {
-  const sessionId = await apiClient.createSession();
-  await apiClient.startSession(sessionId);
-  return sessionId;
+export async function startSessionAudio(sessionId: string): Promise<AudioStreamControl> {
+  return await apiClient.startAudioStream(sessionId);
 }
 
 /**
@@ -722,15 +822,4 @@ export function useSessionStream(
   }
 
   return { cleanup };
-}
-
-// Funzioni utility per l'audio
-
-/**
- * Funzione di supporto per avviare lo streaming audio in una sessione
- * @param sessionId - ID della sessione
- * @returns Promise con il controllo dello streaming audio
- */
-export async function startSessionAudio(sessionId: string): Promise<AudioStreamControl> {
-  return await apiClient.startAudioStream(sessionId);
 }

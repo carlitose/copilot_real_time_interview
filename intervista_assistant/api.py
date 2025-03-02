@@ -11,9 +11,10 @@ from io import BytesIO
 
 from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
-from flask_sock import Sock
+from flask_socketio import SocketIO, emit
 from openai import OpenAI
 from dotenv import load_dotenv
+import numpy as np
 
 from .websocket_realtime_text_thread import WebSocketRealtimeTextThread
 from .utils import ScreenshotManager
@@ -24,8 +25,20 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)
-sock = Sock(app)  # Inizializzazione di Flask-Sock per WebSocket
+CORS(app, resources={r"/api/*": {"origins": "*", "supports_credentials": True, "allow_headers": ["Content-Type", "Authorization"]}}, expose_headers=["Content-Type"])
+
+# Configura Socket.IO con opzioni più permissive
+socketio = SocketIO(
+    app, 
+    cors_allowed_origins="*", 
+    async_mode='threading',
+    path='/socket.io',
+    logger=True,
+    engineio_logger=True,
+    always_connect=True,
+    ping_timeout=60,
+    ping_interval=25,
+)
 
 # Dizionario per gestire le sessioni attive
 active_sessions = {}
@@ -90,20 +103,52 @@ class SessionManager:
     
     def end_session(self):
         """Termina la sessione corrente."""
-        if self.recording and self.text_thread:
-            try:
-                if self.text_thread.recording:
-                    self.text_thread.stop_recording()
-                
-                self.text_thread.stop()
-                # Non abbiamo più wait come in QThread
-                time.sleep(2)  # Attendi 2 secondi per il completamento
-                self.recording = False
+        logger.info(f"SessionManager.end_session chiamato per sessione {self.session_id}")
+        
+        try:
+            # Verifica se abbiamo già terminato
+            if not self.recording and not self.text_thread:
+                logger.info(f"Sessione {self.session_id} era già terminata (recording={self.recording}, text_thread={self.text_thread is not None})")
                 return True
-            except Exception as e:
-                logger.error(f"Error during session termination: {str(e)}")
-                return False
-        return False
+                
+            # Gestione del thread di trascrizione
+            if self.text_thread:
+                logger.info(f"Fermando la registrazione per la sessione {self.session_id}")
+                
+                # Ferma la registrazione se attiva
+                try:
+                    if self.text_thread.recording:
+                        logger.info(f"Thread registrazione attivo, chiamata a stop_recording()")
+                        self.text_thread.stop_recording()
+                except Exception as e:
+                    logger.warning(f"Errore fermando la registrazione: {str(e)}")
+                
+                # Ferma il thread
+                try:
+                    logger.info(f"Fermando il thread di trascrizione")
+                    self.text_thread.stop()
+                    # Non abbiamo più wait come in QThread
+                    time.sleep(2)  # Attendi 2 secondi per il completamento
+                except Exception as e:
+                    logger.warning(f"Errore fermando il thread: {str(e)}")
+                
+                # Pulizia
+                self.text_thread = None
+                logger.info(f"Thread rimosso")
+                
+            # Aggiorna lo stato
+            self.recording = False
+            logger.info(f"Sessione {self.session_id} terminata con successo")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Errore durante la terminazione della sessione {self.session_id}: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            # Anche in caso di errore, proviamo a ripulire lo stato
+            self.recording = False
+            self.text_thread = None
+            return False
     
     def handle_transcription(self, text):
         """Gestisce gli aggiornamenti di trascrizione."""
@@ -459,44 +504,69 @@ def create_session():
         }), 500
 
 # Endpoint per avviare una sessione
-@app.route('/api/sessions/<session_id>/start', methods=['POST'])
+@app.route('/api/sessions/<session_id>/start', methods=['POST', 'OPTIONS'])
 def start_session(session_id):
     """Avvia una sessione esistente."""
+    # Gestione esplicita delle richieste OPTIONS per CORS
+    if request.method == 'OPTIONS':
+        response = app.make_default_options_response()
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        return response
+        
     if session_id not in active_sessions:
-        return jsonify({
-            "success": False,
-            "error": "Session not found."
-        }), 404
+        logger.warning(f"Tentativo di avviare sessione non esistente: {session_id}")
+        # Creiamo la sessione al volo se non esiste
+        active_sessions[session_id] = SessionManager(session_id)
+        logger.info(f"Creata nuova sessione: {session_id}")
     
     try:
         session = active_sessions[session_id]
         success = session.start_session()
+        logger.info(f"Sessione {session_id} avviata con successo: {success}")
         
         return jsonify({
-            "success": success,
+            "success": True,
             "message": "Session started successfully." if success else "Session already active."
         })
     except Exception as e:
         logger.error(f"Error starting session {session_id}: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return jsonify({
             "success": False,
             "error": str(e)
         }), 500
 
 # Endpoint per terminare una sessione
-@app.route('/api/sessions/<session_id>/end', methods=['POST'])
+@app.route('/api/sessions/<session_id>/end', methods=['POST', 'OPTIONS'])
 def end_session(session_id):
     """Termina una sessione esistente."""
+    # Gestione esplicita delle richieste OPTIONS per CORS
+    if request.method == 'OPTIONS':
+        response = app.make_default_options_response()
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        return response
+        
+    # Logging della richiesta di terminazione
+    logger.info(f"Richiesta di terminazione per la sessione {session_id}")
+    
     if session_id not in active_sessions:
+        logger.warning(f"Sessione {session_id} non trovata nel dizionario active_sessions per la terminazione")
         return jsonify({
             "success": False,
             "error": "Session not found."
         }), 404
     
     try:
+        logger.info(f"Terminazione sessione {session_id} - Inizio")
         session = active_sessions[session_id]
         
         # Prima terminiamo correttamente la registrazione e il thread
+        logger.info(f"Terminazione sessione {session_id} - Chiamata a session.end_session()")
         success = session.end_session()
         
         # Aggiungiamo un piccolo ritardo per consentire alle connessioni client di chiudersi
@@ -505,7 +575,12 @@ def end_session(session_id):
         # Poi, se tutto è andato bene, rimuoviamo la sessione dalle sessioni attive
         if success:
             logger.info(f"Sessione {session_id} terminata con successo, rimozione dalla lista")
-            del active_sessions[session_id]
+            # Verifichiamo ancora che la sessione esista prima di eliminarla
+            if session_id in active_sessions:
+                del active_sessions[session_id]
+                logger.info(f"Sessione {session_id} rimossa dal dizionario active_sessions")
+            else:
+                logger.warning(f"Sessione {session_id} non trovata nel dizionario dopo il successo dell'end_session")
         else:
             logger.error(f"Impossibile terminare correttamente la sessione {session_id}")
         
@@ -734,69 +809,127 @@ def get_monitors():
             "error": str(e)
         }), 500
 
-# Endpoint WebSocket per lo streaming audio
-@sock.route('/api/sessions/<session_id>/audio')
-def audio_websocket(ws, session_id):
-    """Gestisce la connessione WebSocket per lo streaming audio."""
-    if session_id not in active_sessions:
-        logger.error(f"WebSocket: Session {session_id} not found")
-        return
+# Endpoint per verificare lo stato di una sessione
+@app.route('/api/sessions/<session_id>/status', methods=['GET', 'OPTIONS'])
+def get_session_status(session_id):
+    """Verifica lo stato di una sessione."""
+    # Gestione esplicita delle richieste OPTIONS per CORS
+    if request.method == 'OPTIONS':
+        response = app.make_default_options_response()
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        return response
         
-    session = active_sessions[session_id]
-    if not session.recording or not session.text_thread:
-        logger.error(f"WebSocket: Session {session_id} not recording")
-        return
-    
-    logger.info(f"WebSocket audio connection established for session {session_id}")
+    if session_id not in active_sessions:
+        return jsonify({
+            "success": False,
+            "error": "Session not found."
+        }), 404
     
     try:
-        while ws.connected:
-            try:
-                # Ricevi i dati audio dal client
-                message = ws.receive()
-                
-                if message:
-                    try:
-                        # Aggiungo log per debug
-                        msg_type = type(message).__name__
-                        msg_size = len(message) if message else 0
-                        logger.debug(f"Received audio data: type={msg_type}, size={msg_size} bytes")
-                        
-                        # Converti i dati audio (gestendo sia binario che base64)
-                        if isinstance(message, str):
-                            # Se riceviamo una stringa, assumiamo che sia base64
-                            try:
-                                import base64
-                                audio_data = base64.b64decode(message)
-                                logger.debug(f"Decoded base64 data, size={len(audio_data)} bytes")
-                            except Exception as e:
-                                logger.error(f"Failed to decode base64: {e}")
-                                continue
-                        else:
-                            # Altrimenti usiamo direttamente i dati binari
-                            audio_data = message
-                        
-                        # Invia i dati audio al thread
-                        if hasattr(session.text_thread, 'add_audio_data'):
-                            session.text_thread.add_audio_data(audio_data)
-                        else:
-                            logger.error("text_thread doesn't have add_audio_data method")
-                            logger.error(f"text_thread type: {type(session.text_thread).__name__}")
-                    except Exception as e:
-                        logger.error(f"Error processing audio data: {str(e)}")
-                        import traceback
-                        logger.error(traceback.format_exc())
-            except Exception as e:
-                logger.error(f"Error receiving message: {str(e)}")
-                # Breve pausa per evitare loop infiniti in caso di errori continui
-                import time
-                time.sleep(0.1)
+        session = active_sessions[session_id]
+        is_recording = session.recording
+        has_text_thread = session.text_thread is not None
+        
+        return jsonify({
+            "success": True,
+            "status": {
+                "is_active": True,
+                "is_recording": is_recording,
+                "has_text_thread": has_text_thread
+            }
+        })
     except Exception as e:
-        logger.error(f"WebSocket error for session {session_id}: {str(e)}")
+        logger.error(f"Error getting status for session {session_id}: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+@socketio.on('connect')
+def handle_connect():
+    """Gestisce la connessione di un client Socket.IO"""
+    logger.info(f"Client connected: {request.sid}")
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """Gestisce la disconnessione di un client Socket.IO"""
+    logger.info(f"Client disconnected: {request.sid}")
+
+@socketio.on('audio_data')
+def handle_audio_data(session_id, audio_data):
+    """Gestisce i dati audio ricevuti dal client"""
+    try:
+        data_type = type(audio_data).__name__
+        data_size = len(audio_data) if isinstance(audio_data, (bytes, list)) else 'non bytes/list'
+        logger.info(f"Ricevuti dati audio per la sessione {session_id}: {data_size} bytes, tipo {data_type}")
+    
+        if session_id not in active_sessions:
+            logger.error(f"SocketIO: Session {session_id} not found")
+            # Creiamo una nuova sessione al volo
+            active_sessions[session_id] = SessionManager(session_id)
+            # E avviamo la sessione
+            success = active_sessions[session_id].start_session()
+            if success:
+                logger.info(f"Creata e avviata nuova sessione {session_id} al volo")
+                emit('status', {'message': 'New session created and started'})
+            else:
+                logger.error(f"Impossibile avviare la sessione {session_id}")
+                emit('error', {'message': 'Failed to start new session'})
+                return
+        
+        session = active_sessions[session_id]
+        # Se la sessione non è in registrazione, proviamo ad avviarla
+        if not session.recording or not session.text_thread:
+            logger.warning(f"SocketIO: Session {session_id} not recording, trying to start it")
+            success = session.start_session()
+            if not success:
+                logger.error(f"SocketIO: Failed to start recording for session {session_id}")
+                emit('error', {'message': 'Session not recording'})
+                return
+            else:
+                logger.info(f"SocketIO: Successfully started recording for session {session_id}")
+                emit('status', {'message': 'Session recording started'})
+        
+        try:
+            # Gestisci i dati audio in base al formato
+            if isinstance(audio_data, bytes):
+                # Usa direttamente i dati binari
+                processed_audio = audio_data
+                logger.debug(f"Received binary audio data: size={len(processed_audio)} bytes")
+            else:
+                # Prova a interpretare come array di samples
+                try:
+                    samples = np.array(audio_data, dtype=np.int16)
+                    processed_audio = samples.tobytes()
+                    logger.debug(f"Processed audio data: samples={len(audio_data)}")
+                except Exception as e:
+                    logger.error(f"Error processing audio data: {e}")
+                    emit('error', {'message': 'Invalid audio data format'})
+                    return
+            
+            # Invia i dati audio al thread
+            if hasattr(session.text_thread, 'add_audio_data'):
+                success = session.text_thread.add_audio_data(processed_audio)
+                if not success:
+                    logger.warning("Failed to add audio data to thread")
+            else:
+                logger.error("text_thread doesn't have add_audio_data method")
+                emit('error', {'message': 'Internal server error - missing add_audio_data method'})
+        except Exception as e:
+            logger.error(f"Error handling audio data: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            emit('error', {'message': f'Internal server error: {str(e)}'})
+    except Exception as outer_e:
+        logger.error(f"Critical error in handle_audio_data: {str(outer_e)}")
         import traceback
         logger.error(traceback.format_exc())
-    finally:
-        logger.info(f"WebSocket audio connection closed for session {session_id}")
+        try:
+            emit('error', {'message': 'Critical server error'})
+        except:
+            pass
 
 # Task periodico per ripulire le sessioni inattive
 def cleanup_inactive_sessions():
@@ -832,4 +965,4 @@ cleanup_thread = threading.Thread(target=cleanup_inactive_sessions, daemon=True)
 cleanup_thread.start()
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    socketio.run(app, debug=True, host='0.0.0.0', port=8000)

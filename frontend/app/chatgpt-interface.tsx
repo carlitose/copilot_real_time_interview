@@ -112,19 +112,23 @@ export default function ChatGPTInterface() {
     return () => {
       if (sessionId) {
         // Ferma lo streaming audio, se attivo
-        audioControl?.stop();
-        // Termina la sessione quando si esce
+        if (audioControl) {
+          audioControl.stop();
+        }
+        // Chiudi gli stream
+        cleanupStream();
+        // Termina la sessione
         apiClient.endSession(sessionId).catch(console.error);
       }
     };
-  }, [sessionId, audioControl]);
+  }, [sessionId, audioControl, cleanupStream]);
 
   // Gestisce l'avvio o la chiusura della sessione
   const toggleSession = async () => {
     try {
       if (isSessionActive) {
-        // Reimpostiamo il flag di errore di streaming
-        setIsStreamError(false);
+        setIsSessionActive(false); // Impostiamo subito a false per evitare ulteriori tentativi di connessione
+        setIsConnected(false);
         
         // Ferma lo streaming audio, se attivo
         if (audioControl) {
@@ -132,27 +136,40 @@ export default function ChatGPTInterface() {
           setAudioControl(null);
         }
         
-        // Termina la sessione
+        // Prima chiudiamo i nostri stream
+        cleanupStream();
+        
         if (sessionId) {
-          // Prima chiudiamo i nostri stream
-          cleanupStream();
-          
-          // Poi chiamiamo endSession
-          await apiClient.endSession(sessionId);
+          try {
+            await apiClient.endSession(sessionId);
+          } catch (error) {
+            console.error('Error ending session:', error);
+          }
           setSessionId(null);
         }
         
-        setIsSessionActive(false);
-        setIsConnected(false);
         setIsRecording(false);
+        // Puliamo i messaggi
+        setMessages([]);
       } else {
         try {
           // Reimpostiamo il flag di errore di streaming
           setIsStreamError(false);
           
-          // Crea una nuova sessione
-          const newSessionId = await apiClient.createSession();
+          // Impostiamo un messaggio di connessione
+          setMessages([{ role: 'assistant', content: 'Connessione in corso...' }]);
+          
+          // Crea una nuova sessione con timeout
+          const sessionPromise = apiClient.createSession();
+          const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Timeout durante la creazione della sessione')), 10000)
+          );
+          
+          const newSessionId = await Promise.race([sessionPromise, timeoutPromise]) as string;
           setSessionId(newSessionId);
+          
+          // Aggiorniamo il messaggio di stato
+          setMessages([{ role: 'assistant', content: 'Sessione creata, avvio in corso...' }]);
           
           // Avvia la sessione
           await apiClient.startSession(newSessionId);
@@ -164,22 +181,34 @@ export default function ChatGPTInterface() {
             setIsRecording(true);
           } catch (audioError: any) {
             console.error("Errore nell'avvio dello streaming audio:", audioError);
-            // Continuiamo anche se lo streaming audio fallisce
             setMessages(prev => [
               ...prev,
               { role: 'assistant', content: 'Non è stato possibile avviare lo streaming audio. La sessione funzionerà in modalità testo.' }
             ]);
           }
           
+          setMessages([{ role: 'assistant', content: 'Sessione avviata! Ora puoi parlare o digitare.' }]);
           setIsSessionActive(true);
           setIsConnected(true);
         } catch (sessionError: any) {
           console.error("Errore nell'avvio della sessione:", sessionError);
-          setMessages(prev => [
-            ...prev,
-            { role: 'assistant', content: `Si è verificato un errore durante l'avvio della sessione: ${sessionError.message}. Verifica che il server sia in esecuzione sulla porta 8000.` }
-          ]);
-          return; // Usciamo senza cambiare lo stato
+          
+          // Puliamo eventuali risorse
+          if (sessionId) {
+            try {
+              await apiClient.endSession(sessionId);
+            } catch (e) {
+              console.error("Errore nella pulizia della sessione:", e);
+            }
+            setSessionId(null);
+          }
+          
+          setMessages([{ 
+            role: 'assistant', 
+            content: `Si è verificato un errore durante l'avvio della sessione: ${sessionError.message}. Verifica che il server sia in esecuzione sulla porta 8000.` 
+          }]);
+          
+          return;
         }
       }
     } catch (error: any) {
