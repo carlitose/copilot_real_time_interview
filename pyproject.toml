@@ -27,6 +27,9 @@ fastapi = "^0.115.11"
 uvicorn = "^0.34.0"
 websockets = "^15.0"
 python-multipart = "^0.0.20"
+flask = "^3.1.0"
+flask-cors = "^5.0.1"
+flask-sock = "^0.7.0"
 
 
 [build-system]

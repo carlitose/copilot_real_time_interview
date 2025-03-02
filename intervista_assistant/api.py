@@ -1,810 +1,835 @@
 #!/usr/bin/env python3
-"""
-API server for Intervista Assistant.
-Provides REST and WebSocket endpoints for the React/Next.js frontend.
-"""
-
 import os
+import time
 import json
 import logging
+import threading
 import asyncio
 import base64
-import tempfile
-from typing import List, Optional, Dict, Any, Set
 from datetime import datetime
+from io import BytesIO
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, File, UploadFile, BackgroundTasks, Request
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from dotenv import load_dotenv
+from flask import Flask, request, jsonify, Response, stream_with_context
+from flask_cors import CORS
+from flask_sock import Sock
 from openai import OpenAI
+from dotenv import load_dotenv
 
-# Import required modules from existing codebase (using absolute imports)
-try:
-    from intervista_assistant.utils.think_process import ThinkProcess
-    from intervista_assistant.utils.screenshot_utils import ScreenshotManager
-except ImportError:
-    # Fallback to direct import if package structure is not detected
-    try:
-        from utils.think_process import ThinkProcess 
-        from utils.screenshot_utils import ScreenshotManager
-    except ImportError:
-        logging.warning("Could not import utility modules - some functionality may be limited")
-        ThinkProcess = None
-        ScreenshotManager = None
-
-# Logging configuration
+from .websocket_realtime_text_thread import WebSocketRealtimeTextThread
+from .utils import ScreenshotManager
+# Configurazione logging
 logging.basicConfig(level=logging.INFO, 
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    filename='app.log')
+                    filename='api.log')
 logger = logging.getLogger(__name__)
 
-# Configura anche il logging sulla console
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-console_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-console_handler.setFormatter(console_formatter)
-logger.addHandler(console_handler)
+app = Flask(__name__)
+CORS(app)
+sock = Sock(app)  # Inizializzazione di Flask-Sock per WebSocket
 
-# Load environment variables
-load_dotenv()
-api_key = os.getenv("OPENAI_API_KEY")
-if not api_key:
-    logger.error("OpenAI API Key not found. Set the environment variable OPENAI_API_KEY.")
-    raise ValueError("OpenAI API Key not found")
+# Dizionario per gestire le sessioni attive
+active_sessions = {}
 
-# Initialize OpenAI client
-client = OpenAI(api_key=api_key)
-
-# Initialize FastAPI
-app = FastAPI(title="Intervista Assistant API")
-
-# Add CORS middleware to allow requests from the Next.js frontend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Update with your frontend URL
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Initialize ScreenshotManager
-screenshot_manager = ScreenshotManager()
-
-# Pydantic models for API requests/responses
-class Message(BaseModel):
-    role: str
-    content: str
-
-class MessageList(BaseModel):
-    messages: List[Message]
-
-class ThinkRequest(BaseModel):
-    messages: List[Message]
-
-class ThinkResponse(BaseModel):
-    summary: str
-    solution: str
-
-class ScreenshotRequest(BaseModel):
-    monitor_index: Optional[int] = None
-
-class MonitorInfo(BaseModel):
-    index: int
-    width: int
-    height: int
-    name: str
-
-class MonitorList(BaseModel):
-    monitors: List[MonitorInfo]
-
-# WebSocket connection manager
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-        self.session_connections: Dict[str, Set[WebSocket]] = {}
-        logger.info("ConnectionManager initialized")
-
-    async def connect(self, websocket: WebSocket, session_id: str = "default"):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-        
-        # Add to session-specific connections
-        if session_id not in self.session_connections:
-            self.session_connections[session_id] = set()
-        self.session_connections[session_id].add(websocket)
-        
-        logger.info(f"WebSocket client connected to session {session_id}. Total connections: {len(self.active_connections)}")
-
-    def disconnect(self, websocket: WebSocket, session_id: str = "default"):
-        self.active_connections.remove(websocket)
-        
-        # Remove from session-specific connections
-        if session_id in self.session_connections and websocket in self.session_connections[session_id]:
-            self.session_connections[session_id].remove(websocket)
-            if not self.session_connections[session_id]:
-                del self.session_connections[session_id]
-        
-        logger.info(f"WebSocket client disconnected from session {session_id}. Remaining connections: {len(self.active_connections)}")
-
-    async def broadcast(self, message: str):
-        logger.info(f"Broadcasting message to {len(self.active_connections)} clients")
-        for connection in self.active_connections:
-            await connection.send_text(message)
+class SessionManager:
+    """Classe per gestire una sessione di conversazione."""
     
-    async def broadcast_to_session(self, message: str, session_id: str = "default"):
-        if session_id in self.session_connections:
-            connections = self.session_connections[session_id]
-            logger.info(f"Broadcasting message to {len(connections)} clients in session {session_id}")
-            for connection in connections:
-                await connection.send_text(message)
+    def __init__(self, session_id):
+        """Inizializza una nuova sessione."""
+        self.session_id = session_id
+        self.recording = False
+        self.text_thread = None
+        self.chat_history = []
+        self.screenshot_manager = ScreenshotManager()
+        self.client = None
+        self.connected = False
+        self.last_activity = datetime.now()
+        
+        # Inizializza il client OpenAI
+        load_dotenv()
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OpenAI API Key not found. Set the environment variable OPENAI_API_KEY.")
+        self.client = OpenAI(api_key=api_key)
+        
+        # Crea un evento per gestire gli aggiornamenti asincroni
+        self.update_event = asyncio.Event()
+        self.transcription_updates = []
+        self.response_updates = []
+        self.error_updates = []
+        
+    def start_session(self):
+        """Avvia una nuova sessione e inizia la registrazione."""
+        if not self.recording:
+            self.recording = True
+            
+            # Configura i callback per la classe WebSocketRealtimeTextThread
+            callbacks = {
+                'on_transcription': self.handle_transcription,
+                'on_response': self.handle_response,
+                'on_error': self.handle_error,
+                'on_connection_status': self.handle_connection_status
+            }
+            
+            self.text_thread = WebSocketRealtimeTextThread(callbacks=callbacks)
+            self.text_thread.start()
+            
+            # Attendi la connessione prima di iniziare la registrazione
+            max_wait_time = 10  # secondi
+            start_time = time.time()
+            while not self.text_thread.connected and time.time() - start_time < max_wait_time:
+                time.sleep(0.1)
+            
+            if not self.text_thread.connected:
+                logger.error(f"Connection timeout for session {self.session_id}")
+                self.recording = False
+                return False
+            
+            self.text_thread.start_recording()
+            return True
+        return False
+    
+    def end_session(self):
+        """Termina la sessione corrente."""
+        if self.recording and self.text_thread:
+            try:
+                if self.text_thread.recording:
+                    self.text_thread.stop_recording()
+                
+                self.text_thread.stop()
+                # Non abbiamo più wait come in QThread
+                time.sleep(2)  # Attendi 2 secondi per il completamento
+                self.recording = False
+                return True
+            except Exception as e:
+                logger.error(f"Error during session termination: {str(e)}")
+                return False
+        return False
+    
+    def handle_transcription(self, text):
+        """Gestisce gli aggiornamenti di trascrizione."""
+        self.last_activity = datetime.now()
+        # Non aggiungere messaggi di stato alla cronologia
+        if text != "Recording in progress..." and not text.startswith('\n[Audio processed at'):
+            if not self.chat_history or self.chat_history[-1]["role"] != "user" or self.chat_history[-1]["content"] != text:
+                self.chat_history.append({"role": "user", "content": text})
+        
+        # Aggiungi l'aggiornamento alla coda
+        timestamp = datetime.now().isoformat()
+        self.transcription_updates.append({
+            "timestamp": timestamp,
+            "text": text
+        })
+        
+        logger.info(f"Transcription update: {text[:50]}...")
+    
+    def handle_response(self, text):
+        """Gestisce gli aggiornamenti di risposta."""
+        self.last_activity = datetime.now()
+        if not text:
+            return
+            
+        # Aggiorna la cronologia della chat
+        if (not self.chat_history or self.chat_history[-1]["role"] != "assistant"):
+            self.chat_history.append({"role": "assistant", "content": text})
+        elif self.chat_history and self.chat_history[-1]["role"] == "assistant":
+            current_time = datetime.now().strftime("%H:%M:%S")
+            previous_content = self.chat_history[-1]["content"]
+            self.chat_history[-1]["content"] = f"{previous_content}\n--- Response at {current_time} ---\n{text}"
+        
+        # Aggiungi l'aggiornamento alla coda
+        timestamp = datetime.now().isoformat()
+        self.response_updates.append({
+            "timestamp": timestamp,
+            "text": text
+        })
+        
+        logger.info(f"Response update: {text[:50]}...")
+    
+    def handle_error(self, message):
+        """Gestisce gli aggiornamenti di errore."""
+        # Ignora alcuni errori noti che non richiedono notifica
+        if "buffer too small" in message or "Conversation already has an active response" in message:
+            logger.warning(f"Ignored error (log only): {message}")
+            return
+            
+        timestamp = datetime.now().isoformat()
+        self.error_updates.append({
+            "timestamp": timestamp,
+            "message": message
+        })
+        logger.error(f"Error in session {self.session_id}: {message}")
+    
+    def handle_connection_status(self, connected):
+        """Gestisce gli aggiornamenti dello stato di connessione."""
+        self.connected = connected
+        logger.info(f"Connection status for session {self.session_id}: {connected}")
+    
+    def get_updates(self, update_type=None):
+        """Restituisce gli aggiornamenti in base al tipo."""
+        if update_type == "transcription":
+            updates = self.transcription_updates.copy()
+            self.transcription_updates = []
+            return updates
+        elif update_type == "response":
+            updates = self.response_updates.copy()
+            self.response_updates = []
+            return updates
+        elif update_type == "error":
+            updates = self.error_updates.copy()
+            self.error_updates = []
+            return updates
         else:
-            logger.warning(f"No connections found for session {session_id}")
-
-manager = ConnectionManager()
-
-# Load system prompt
-def load_system_prompt():
-    try:
-        with open(os.path.join(os.path.dirname(__file__), "system_prompt.json"), "r") as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error(f"Error loading system prompt: {e}")
-        return {"item": {"content": [{"text": "You are an AI assistant helping with a coding interview."}]}}
-
-system_prompt = load_system_prompt()
-
-# REST Endpoints
-@app.post("/api/send-message")
-async def send_message(message_data: MessageList, background_tasks: BackgroundTasks):
-    """Process a text message and return the AI response."""
-    try:
-        logger.info(f"Received message request with {len(message_data.messages)} messages")
-        messages = [{"role": msg.role, "content": msg.content} for msg in message_data.messages]
+            # Restituisci tutti gli aggiornamenti
+            all_updates = {
+                "transcription": self.transcription_updates.copy(),
+                "response": self.response_updates.copy(),
+                "error": self.error_updates.copy()
+            }
+            self.transcription_updates = []
+            self.response_updates = []
+            self.error_updates = []
+            return all_updates
+    
+    def send_text_message(self, text):
+        """Invia un messaggio di testo al modello."""
+        if not self.recording or not self.text_thread or not self.text_thread.connected:
+            return False, "Not connected. Please start a session first."
         
-        # Add system prompt if it's not included
-        if messages and messages[0]["role"] != "system" and system_prompt:
-            messages.insert(0, {
-                "role": "system",
-                "content": system_prompt["item"]["content"][0]["text"]
-            })
+        # Verifica che ci sia testo da inviare
+        if not text or not text.strip():
+            return False, "No text to send."
+            
+        # Aggiorna la cronologia della chat
+        self.chat_history.append({"role": "user", "content": text})
         
-        logger.info(f"Sending request to OpenAI with {len(messages)} messages")
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            temperature=0.7,
-        )
+        # Invia il testo attraverso il thread realtime
+        success = self.text_thread.send_text(text)
         
-        logger.info("Received response from OpenAI")
+        return success, None if success else "Unable to send message. Please try again."
+    
+    def take_and_analyze_screenshot(self, monitor_index=None):
+        """Acquisisce uno screenshot e lo invia per l'analisi."""
+        if not self.recording or not self.text_thread or not self.text_thread.connected:
+            return False, "Not connected. Please start a session first."
         
-        # Broadcast the response to all connected WebSocket clients
-        response_content = response.choices[0].message.content
-        current_time = datetime.now().strftime("%H:%M:%S")
-        
-        background_tasks.add_task(
-            broadcast_response_to_websockets,
-            f"Response at {current_time}\n\n{response_content}"
-        )
-        
-        return {"response": response_content}
-    except Exception as e:
-        logger.error(f"Error processing message: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-async def broadcast_response_to_websockets(response_content: str):
-    """Broadcast response to all connected WebSocket clients."""
-    try:
-        await manager.broadcast(json.dumps({
-            "type": "response",
-            "content": response_content
-        }))
-    except Exception as e:
-        logger.error(f"Error broadcasting response: {e}")
-
-@app.get("/api/monitors")
-async def get_monitors():
-    """Get a list of available monitors for screenshot capture."""
-    try:
-        monitors = screenshot_manager.get_monitors()
-        monitor_list = []
-        
-        for i, monitor in enumerate(monitors):
-            monitor_list.append({
-                "index": i,
-                "width": monitor["width"],
-                "height": monitor["height"],
-                "name": f"Monitor {i+1}: {monitor['width']}x{monitor['height']}"
-            })
-        
-        return {"monitors": monitor_list}
-    except Exception as e:
-        logger.error(f"Error getting monitors: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/take-screenshot")
-async def take_screenshot(request: ScreenshotRequest, background_tasks: BackgroundTasks):
-    """Take a screenshot and return the path to the saved file."""
-    try:
-        logger.info(f"Taking screenshot with monitor index: {request.monitor_index}")
-        screenshot_path = screenshot_manager.take_screenshot(monitor_index=request.monitor_index)
-        
-        # Return the path to the screenshot
-        return {"screenshot_path": str(screenshot_path)}
-    except Exception as e:
-        logger.error(f"Error taking screenshot: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/analyze-screenshot")
-async def analyze_screenshot(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    """Analyze a screenshot and return the AI's observations."""
-    try:
-        logger.info(f"Received screenshot analysis request, filename: {file.filename}")
-        contents = await file.read()
-        base64_image = base64.b64encode(contents).decode("utf-8")
-        
-        # Prepare messages with the image
+        try:
+            # Acquisisci lo screenshot
+            logger.info(f"Capturing screenshot for monitor: {monitor_index}")
+            screenshot_path = self.screenshot_manager.take_screenshot(monitor_index=monitor_index)
+            
+            # Preparazione dei messaggi per gpt-4o-mini con la cronologia della chat
+            with open(screenshot_path, "rb") as image_file:
+                base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+            
+            # Prepara i messaggi con la cronologia
+            messages = self._prepare_messages_with_history(base64_image)
+            
+            # Avvia un thread separato per l'analisi
+            analysis_thread = threading.Thread(
+                target=self._analyze_image_async,
+                args=(messages, screenshot_path)
+            )
+            analysis_thread.start()
+            
+            logger.info(f"Screenshot analysis initiated for session {self.session_id}")
+            return True, screenshot_path
+            
+        except Exception as e:
+            error_msg = f"Error during screenshot capture: {str(e)}"
+            logger.error(error_msg)
+            return False, error_msg
+    
+    def _analyze_image_async(self, messages, screenshot_path):
+        """Analizza l'immagine in modo asincrono."""
+        try:
+            # Notifica che l'analisi è iniziata
+            self.handle_transcription("\n[Screenshot sent for analysis]\n")
+            
+            # Chiamata a GPT-4o-mini per analizzare l'immagine
+            logger.info(f"Sending image to gpt-4o-mini for analysis in session {self.session_id}")
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                max_tokens=1000
+            )
+            
+            # Ottieni la risposta dell'assistente
+            assistant_response = response.choices[0].message.content
+            logger.info(f"Received response from gpt-4o-mini: {assistant_response[:100]}...")
+            
+            # Aggiorna la risposta
+            self.handle_response(assistant_response)
+            
+            # Invia un messaggio di contesto al thread realtime
+            if self.text_thread and self.text_thread.connected:
+                context_msg = f"[I've analyzed the screenshot of a coding exercise/technical interview question. Here's what I found: {assistant_response[:500]}... Let me know if you need more specific details or have questions about how to approach this problem.]"
+                success = self.text_thread.send_text(context_msg)
+                if success:
+                    logger.info(f"Image analysis context sent to realtime thread for session {self.session_id}")
+                else:
+                    logger.error(f"Failed to send image analysis context to realtime thread for session {self.session_id}")
+            
+        except Exception as e:
+            error_msg = f"Error during image analysis: {str(e)}"
+            logger.error(error_msg)
+            self.handle_error(error_msg)
+    
+    def _prepare_messages_with_history(self, base64_image=None):
+        """Prepara l'array di messaggi per gpt-4o-mini includendo la cronologia e l'immagine."""
         messages = []
-        if system_prompt:
-            messages.append({
-                "role": "system",
-                "content": system_prompt["item"]["content"][0]["text"] + " Please analyze the following screenshot and describe what you see."
-            })
         
+        # Aggiungi il messaggio di sistema
+        messages.append({
+            "role": "system", 
+            "content": "You are a specialized assistant for technical interviews, analyzing screenshots of coding exercises and technical problems. Help the user understand the content of these screenshots in detail. Your analysis should be particularly useful for a candidate during a technical interview or coding assessment."
+        })
+        
+        # Aggiungi la cronologia della conversazione precedente
+        history_to_include = self.chat_history[:-2] if len(self.chat_history) > 2 else []
+        messages.extend(history_to_include)
+        
+        # Aggiungi il messaggio con l'immagine
+        image_url = f"data:image/jpeg;base64,{base64_image}" if base64_image else ""
         messages.append({
             "role": "user",
             "content": [
-                {"type": "text", "text": "Please analyze this screenshot and describe what you see:"},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                {"type": "text", "text": "Please analyze this screenshot of a potential technical interview question or coding exercise. Describe what you see in detail, extract any visible code or problem statement, explain the problem if possible, and suggest approaches or ideas to solve it."},
+                {"type": "image_url", "image_url": {"url": image_url}}
             ]
         })
         
-        logger.info("Sending screenshot to OpenAI for analysis")
+        return messages
+    
+    def start_think_process(self):
+        """Avvia il processo di pensiero avanzato."""
+        if not self.chat_history:
+            return False, "No conversation to analyze. Please start a conversation first."
         
-        # Broadcast a notification that analysis is in progress
-        background_tasks.add_task(
-            broadcast_response_to_websockets,
-            "Analyzing screenshot... Please wait."
-        )
+        if not self.recording or not self.text_thread or not self.text_thread.connected:
+            return False, "Session not active. Please start a session first."
         
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            temperature=0.7,
-        )
-        
-        analysis_content = response.choices[0].message.content
-        logger.info("Received analysis from OpenAI")
-        
-        # Broadcast the analysis to all connected WebSocket clients
-        current_time = datetime.now().strftime("%H:%M:%S")
-        background_tasks.add_task(
-            broadcast_response_to_websockets,
-            f"Screenshot Analysis at {current_time}\n\n{analysis_content}"
-        )
-        
-        return {"analysis": analysis_content}
-    except Exception as e:
-        logger.error(f"Error analyzing screenshot: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/think")
-async def think(request: ThinkRequest, background_tasks: BackgroundTasks):
-    """Process advanced thinking request and return summary and solution."""
-    try:
-        logger.info(f"Received think request with {len(request.messages)} messages")
-        messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
-        
-        # Create think process with fallback
-        if ThinkProcess is not None:
-            try:
-                think_process = ThinkProcess(client)
-                
-                # Start the thinking process in the background
-                background_tasks.add_task(
-                    process_thinking_request,
-                    think_process,
-                    messages
-                )
-                
-                return {"status": "Thinking process started in background"}
-            except Exception as tp_error:
-                logger.error(f"Error with ThinkProcess: {tp_error}")
-                raise
-        else:
-            # Fallback to simple completion if ThinkProcess not available
-            logger.warning("ThinkProcess not available, using fallback")
-            
-            # Start the fallback thinking process in the background
-            background_tasks.add_task(
-                process_thinking_fallback,
-                messages
-            )
-            
-            return {"status": "Thinking process started in background (fallback mode)"}
-    except Exception as e:
-        logger.error(f"Error in think process: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-async def process_thinking_request(think_process: ThinkProcess, messages: List[Dict[str, Any]]):
-    """Process a thinking request in the background."""
-    try:
-        # Generate summary
-        logger.info("Generating summary with GPT-4o-mini")
-        summary = think_process.summarize_conversation(messages)
-        
-        # Broadcast the summary to all connected WebSocket clients
-        await manager.broadcast(json.dumps({
-            "type": "response",
-            "content": "**🧠 CONVERSATION SUMMARY (GPT-4o-mini):**\n\n" + summary
-        }))
-        
-        # Generate solution
-        logger.info("Generating solution with o1-preview")
-        solution = think_process.deep_thinking(summary)
-        
-        # Broadcast the solution to all connected WebSocket clients
-        await manager.broadcast(json.dumps({
-            "type": "response",
-            "content": "**🚀 IN-DEPTH ANALYSIS AND SOLUTION (o1-preview):**\n\n" + solution
-        }))
-        
-        logger.info("Think process completed")
-    except Exception as e:
-        logger.error(f"Error in background thinking process: {e}")
-        await manager.broadcast(json.dumps({
-            "type": "error",
-            "content": f"Error in thinking process: {str(e)}"
-        }))
-
-async def process_thinking_fallback(messages: List[Dict[str, Any]]):
-    """Process a thinking request using fallback method."""
-    try:
-        # Generate summary
-        summary_messages = messages.copy()
-        summary_messages.append({
-            "role": "user", 
-            "content": "Please summarize our conversation so far in 2-3 sentences."
-        })
-        
-        logger.info("Generating summary with OpenAI fallback")
-        summary_response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=summary_messages,
-            temperature=0.7,
-        )
-        summary = summary_response.choices[0].message.content
-        
-        # Broadcast the summary to all connected WebSocket clients
-        await manager.broadcast(json.dumps({
-            "type": "response",
-            "content": "**🧠 CONVERSATION SUMMARY:**\n\n" + summary
-        }))
-        
-        # Generate solution
-        solution_messages = messages.copy()
-        solution_messages.append({
-            "role": "user",
-            "content": f"Based on our conversation and this summary: '{summary}', please provide a detailed solution or answer."
-        })
-        
-        logger.info("Generating solution with OpenAI fallback")
-        solution_response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=solution_messages,
-            temperature=0.7,
-        )
-        solution = solution_response.choices[0].message.content
-        
-        # Broadcast the solution to all connected WebSocket clients
-        await manager.broadcast(json.dumps({
-            "type": "response",
-            "content": "**🚀 IN-DEPTH ANALYSIS AND SOLUTION:**\n\n" + solution
-        }))
-        
-        logger.info("Fallback think process completed")
-    except Exception as e:
-        logger.error(f"Error in fallback thinking process: {e}")
-        await manager.broadcast(json.dumps({
-            "type": "error",
-            "content": f"Error in thinking process: {str(e)}"
-        }))
-
-@app.post("/api/transcribe-audio")
-async def transcribe_audio(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    """Transcribe audio using OpenAI's Whisper model and process the transcription."""
-    try:
-        logger.info(f"Received audio transcription request, filename: {file.filename}")
-        contents = await file.read()
-        
-        # Salva temporaneamente il file
-        temp_file_path = f"/tmp/{file.filename}"
-        with open(temp_file_path, "wb") as f:
-            f.write(contents)
-        
-        # Transcribe using OpenAI Whisper
-        logger.info("Transcribing audio with OpenAI Whisper")
         try:
-            with open(temp_file_path, "rb") as audio_file:
-                transcript = client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=audio_file
-                )
+            # Notifica che l'analisi è iniziata
+            self.handle_transcription("\n[Deep analysis of the conversation in progress...]\n")
             
-            transcription_text = transcript.text
-            logger.info(f"Audio transcribed: {transcription_text[:100]}...")
+            # Prepara i messaggi per l'elaborazione
+            messages_for_processing = []
+            for msg in self.chat_history:
+                messages_for_processing.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
             
-            # Broadcast the transcription to all connected WebSocket clients
-            current_time = datetime.now().strftime("%H:%M:%S")
-            await manager.broadcast(json.dumps({
-                "type": "transcription",
-                "content": f"[Audio processed at {current_time}]\n{transcription_text}"
-            }))
-            
-            # Process the transcription with OpenAI to get a response
-            background_tasks.add_task(
-                process_transcription,
-                transcription_text
+            # Avvia un thread separato per l'analisi
+            think_thread = threading.Thread(
+                target=self._process_thinking_async,
+                args=(messages_for_processing,)
             )
+            think_thread.start()
             
-            return {"transcription": transcription_text}
-        finally:
-            # Clean up temp file
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
-    except Exception as e:
-        logger.error(f"Error transcribing audio: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-async def process_transcription(transcription_text: str):
-    """Process a transcription and generate a response."""
-    try:
-        # Prepare messages for OpenAI
-        messages = []
-        if system_prompt:
-            messages.append({
-                "role": "system",
-                "content": system_prompt["item"]["content"][0]["text"]
-            })
-        
-        messages.append({
-            "role": "user",
-            "content": transcription_text
-        })
-        
-        logger.info(f"Processing transcription with OpenAI: {transcription_text[:100]}...")
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            temperature=0.7,
-        )
-        
-        response_content = response.choices[0].message.content
-        logger.info(f"Received response from OpenAI: {response_content[:100]}...")
-        
-        # Broadcast the response to all connected WebSocket clients
-        current_time = datetime.now().strftime("%H:%M:%S")
-        await manager.broadcast(json.dumps({
-            "type": "response",
-            "content": f"Response at {current_time}\n\n{response_content}"
-        }))
-    except Exception as e:
-        logger.error(f"Error processing transcription: {e}")
-        await manager.broadcast(json.dumps({
-            "type": "error",
-            "content": f"Error processing transcription: {str(e)}"
-        }))
-
-@app.post("/api/send-text")
-async def send_text(message: Message, background_tasks: BackgroundTasks):
-    """Send a text message directly and get a response."""
-    try:
-        logger.info(f"Received text message: {message.content[:100]}...")
-        
-        # Broadcast the message to all connected WebSocket clients
-        current_time = datetime.now().strftime("%H:%M:%S")
-        await manager.broadcast(json.dumps({
-            "type": "transcription",
-            "content": f"[Text message sent at {current_time}]\n{message.content}"
-        }))
-        
-        # Process the message with OpenAI to get a response
-        background_tasks.add_task(
-            process_transcription,
-            message.content
-        )
-        
-        return {"status": "Message received and processing started"}
-    except Exception as e:
-        logger.error(f"Error sending text message: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Endpoint di test per verificare la comunicazione HTTP
-@app.post("/api/ping-test")
-async def ping_test(request: Request):
-    """Test endpoint to verify HTTP communication."""
-    logger.info("Received ping-test request")
-    try:
-        body = await request.json()
-        message = body.get("message", "No message provided")
-        logger.info(f"Ping message: {message}")
-        return {
-            "status": "success",
-            "message": f"Received: {message}",
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error in ping-test: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# WebSocket endpoint for real-time communication
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    logger.info(f"WebSocket connection request from: {websocket.client.host}:{websocket.client.port}")
-    logger.info(f"WebSocket headers: {websocket.headers}")
-    
-    await manager.connect(websocket)
-    logger.info(f"WebSocket connection accepted. Active connections: {len(manager.active_connections)}")
-    
-    # Send an initial welcome message to confirm the connection is working
-    try:
-        welcome_message = {
-            "type": "system",
-            "content": "WebSocket connection established successfully with the server",
-            "timestamp": datetime.now().isoformat()
-        }
-        await websocket.send_text(json.dumps(welcome_message))
-        logger.info("Sent welcome message to new WebSocket client")
-    except Exception as e:
-        logger.error(f"Error sending welcome message: {e}")
-    
-    try:
-        logger.info("New WebSocket connection established")
-        while True:
-            data = await websocket.receive_text()
-            logger.info(f"Received WebSocket message: {data[:100]}...")
+            logger.info(f"Think process initiated for session {self.session_id}")
+            return True, None
             
-            try:
-                message_data = json.loads(data)
-                
-                # Handle different message types
-                if message_data["type"] == "text":
-                    messages = message_data["messages"]
-                    logger.info(f"Processing text message with {len(messages)} messages")
-                    
-                    # Log dei messaggi ricevuti per debug
-                    for idx, msg in enumerate(messages):
-                        role = msg.get('role', 'unknown')
-                        content_preview = msg.get('content', '')[:50]
-                        logger.info(f"Message {idx}: role={role}, content preview: {content_preview}...")
-                    
-                    try:
-                        # Add system prompt if it's not included
-                        if messages and messages[0]["role"] != "system" and system_prompt:
-                            messages.insert(0, {
-                                "role": "system",
-                                "content": system_prompt["item"]["content"][0]["text"]
-                            })
-                        
-                        logger.info("Calling OpenAI API for response")
-                        response = client.chat.completions.create(
-                            model="gpt-4o",
-                            messages=messages,
-                            temperature=0.7,
-                        )
-                        
-                        response_content = response.choices[0].message.content
-                        logger.info(f"Sending response via WebSocket: {response_content[:100]}...")
-                        
-                        current_time = datetime.now().strftime("%H:%M:%S")
-                        formatted_response = f"Response at {current_time}\n\n{response_content}"
-                        
-                        response_data = {
-                            "type": "response",
-                            "content": formatted_response
-                        }
-                        
-                        logger.info(f"Sending response data: {str(response_data)[:200]}...")
-                        await websocket.send_text(json.dumps(response_data))
-                        logger.info("Response sent successfully")
-                    except Exception as e:
-                        logger.error(f"Error processing message: {e}")
-                        error_response = {
-                            "type": "error",
-                            "content": f"Error processing your request: {str(e)}"
-                        }
-                        await websocket.send_text(json.dumps(error_response))
-                elif message_data["type"] == "audio":
-                    # Gestione dello streaming audio
-                    logger.info("Received audio stream chunk via WebSocket")
-                    
-                    try:
-                        # Estrai l'audio base64 dal messaggio
-                        base64_audio = message_data.get("audio", "")
-                        if not base64_audio:
-                            logger.error("Audio stream chunk is empty")
-                            continue
-                            
-                        # Decodifica l'audio da base64 a bytes
-                        audio_bytes = base64.b64decode(base64_audio)
-                        logger.info(f"Decoded audio chunk, size: {len(audio_bytes)} bytes")
-                        
-                        # Salva temporaneamente il file
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                        
-                        # Utilizza .wav che è un formato supportato esplicitamente da OpenAI
-                        temp_file_path = f"/tmp/audio_chunk_{timestamp}.wav"
-                        
-                        with open(temp_file_path, "wb") as f:
-                            f.write(audio_bytes)
-                        
-                        # Transcribe usando OpenAI Whisper
-                        try:
-                            with open(temp_file_path, "rb") as audio_file:
-                                transcript = client.audio.transcriptions.create(
-                                    model="whisper-1",
-                                    file=audio_file
-                                )
-                            
-                            transcription_text = transcript.text
-                            if transcription_text.strip():  # Invia solo se c'è testo
-                                logger.info(f"Audio chunk transcribed: {transcription_text}")
-                                
-                                # Broadcast della trascrizione a tutti i client WebSocket
-                                current_time = datetime.now().strftime("%H:%M:%S")
-                                await manager.broadcast(json.dumps({
-                                    "type": "transcription",
-                                    "content": f"{transcription_text}"
-                                }))
-                                
-                                # Avvia l'elaborazione della trascrizione in background
-                                # per ottenere una risposta dal modello AI
-                                asyncio.create_task(process_transcription(transcription_text))
-                            else:
-                                logger.info("Audio chunk transcription is empty, skipping")
-                        except Exception as e:
-                            logger.error(f"Error transcribing audio chunk: {e}")
-                            await websocket.send_text(json.dumps({
-                                "type": "error",
-                                "content": f"Error transcribing audio: {str(e)}"
-                            }))
-                        finally:
-                            # Pulizia file temporaneo
-                            if os.path.exists(temp_file_path):
-                                os.remove(temp_file_path)
-                    except Exception as e:
-                        logger.error(f"Error processing audio stream: {e}")
-                        await websocket.send_text(json.dumps({
-                            "type": "error",
-                            "content": f"Error processing audio stream: {str(e)}"
-                        }))
-                elif message_data["type"] == "ping":
-                    # Risponde a messaggi di ping per testing
-                    logger.info("Received ping message, sending pong")
-                    
-                    # Log more details about the ping message
-                    debug_info = message_data.get("debug", {})
-                    logger.info(f"Ping debug info: {debug_info}")
-                    
-                    # Send a more detailed response
-                    response_data = {
-                        "type": "pong",
-                        "timestamp": message_data.get("timestamp", ""),
-                        "server_time": datetime.now().isoformat(),
-                        "message": "Pong response from server",
-                        "server_info": {
-                            "connections": len(manager.active_connections),
-                            "api_version": "1.0.0"
-                        }
-                    }
-                    
-                    logger.info(f"Sending pong response: {response_data}")
-                    await websocket.send_text(json.dumps(response_data))
-                elif message_data["type"] == "think":
-                    # Process thinking request
-                    logger.info("Received thinking request via WebSocket")
-                    messages = message_data.get("messages", [])
-                    
-                    if ThinkProcess is not None:
-                        think_process = ThinkProcess(client)
-                        
-                        # Generate summary
-                        logger.info("Generating summary with GPT-4o-mini")
-                        summary = think_process.summarize_conversation(messages)
-                        
-                        # Send summary to client
-                        await websocket.send_text(json.dumps({
-                            "type": "response",
-                            "content": "**🧠 CONVERSATION SUMMARY (GPT-4o-mini):**\n\n" + summary
-                        }))
-                        
-                        # Generate solution
-                        logger.info("Generating solution with o1-preview")
-                        solution = think_process.deep_thinking(summary)
-                        
-                        # Send solution to client
-                        await websocket.send_text(json.dumps({
-                            "type": "response",
-                            "content": "**🚀 IN-DEPTH ANALYSIS AND SOLUTION (o1-preview):**\n\n" + solution
-                        }))
-                    else:
-                        # Fallback
-                        logger.warning("ThinkProcess not available, using fallback")
-                        
-                        # Generate summary
-                        summary_messages = messages.copy()
-                        summary_messages.append({
-                            "role": "user", 
-                            "content": "Please summarize our conversation so far in 2-3 sentences."
-                        })
-                        
-                        summary_response = client.chat.completions.create(
-                            model="gpt-4o",
-                            messages=summary_messages,
-                            temperature=0.7,
-                        )
-                        summary = summary_response.choices[0].message.content
-                        
-                        # Send summary to client
-                        await websocket.send_text(json.dumps({
-                            "type": "response",
-                            "content": "**🧠 CONVERSATION SUMMARY:**\n\n" + summary
-                        }))
-                        
-                        # Generate solution
-                        solution_messages = messages.copy()
-                        solution_messages.append({
-                            "role": "user",
-                            "content": f"Based on our conversation and this summary: '{summary}', please provide a detailed solution or answer."
-                        })
-                        
-                        solution_response = client.chat.completions.create(
-                            model="gpt-4o",
-                            messages=solution_messages,
-                            temperature=0.7,
-                        )
-                        solution = solution_response.choices[0].message.content
-                        
-                        # Send solution to client
-                        await websocket.send_text(json.dumps({
-                            "type": "response",
-                            "content": "**🚀 IN-DEPTH ANALYSIS AND SOLUTION:**\n\n" + solution
-                        }))
+        except Exception as e:
+            error_msg = f"Error during think process initiation: {str(e)}"
+            logger.error(error_msg)
+            return False, error_msg
+    
+    def _process_thinking_async(self, messages):
+        """Esegue il processo di pensiero avanzato in modo asincrono."""
+        try:
+            # Step 1: Genera il riassunto con GPT-4o-mini
+            logger.info(f"Generating summary with GPT-4o-mini for session {self.session_id}")
+            summary = self._generate_summary(messages)
+            
+            # Invia il riassunto
+            self.handle_response("**🧠 CONVERSATION SUMMARY (GPT-4o-mini):**\n\n" + summary)
+            
+            # Step 2: Esegui l'analisi approfondita con o1-preview
+            logger.info(f"Performing in-depth analysis with o1-preview for session {self.session_id}")
+            solution = self._generate_solution(summary)
+            
+            # Invia la soluzione
+            self.handle_response("**🚀 IN-DEPTH ANALYSIS AND SOLUTION (o1-preview):**\n\n" + solution)
+            
+            # Invia un messaggio di contesto al thread realtime
+            if self.text_thread and self.text_thread.connected:
+                context_msg = f"[I've completed an in-depth analysis of our conversation. I've identified the key problems and generated detailed solutions. If you have specific questions about any part of the solution, let me know!]"
+                success = self.text_thread.send_text(context_msg)
+                if success:
+                    logger.info(f"Analysis context sent to realtime thread for session {self.session_id}")
                 else:
-                    logger.warning(f"Unknown message type: {message_data.get('type')}")
-                    await websocket.send_text(json.dumps({
-                        "type": "error",
-                        "content": f"Unknown message type: {message_data.get('type')}"
-                    }))
-            except json.JSONDecodeError as e:
-                logger.error(f"Invalid JSON received: {e}")
-                await websocket.send_text(json.dumps({
-                    "type": "error",
-                    "content": "Invalid JSON format"
-                }))
+                    logger.error(f"Unable to send analysis context to realtime thread for session {self.session_id}")
+            
+        except Exception as e:
+            error_msg = f"Error during thinking process: {str(e)}"
+            logger.error(error_msg)
+            self.handle_error(error_msg)
     
-    except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")
-        manager.disconnect(websocket)
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}", exc_info=True)
+    def _generate_summary(self, messages):
+        """Genera un riassunto della conversazione usando GPT-4o-mini."""
         try:
-            await websocket.send_text(json.dumps({
-                "type": "error",
-                "content": str(e)
-            }))
-        except:
-            logger.error("Could not send error message to client, connection might be closed")
-        finally:
-            manager.disconnect(websocket)
+            # Crea un prompt per il riassunto
+            summary_prompt = {
+                "role": "system",
+                "content": """Analyze the conversation history and create a concise summary in English. 
+                Focus on:
+                1. Key problems or questions discussed
+                2. Important context
+                3. Any programming challenges mentioned
+                4. Current state of the discussion
+                
+                Your summary should be comprehensive but brief, highlighting the most important aspects 
+                that would help another AI model solve any programming or logical problems mentioned."""
+            }
+            
+            # Clona i messaggi e aggiungi il prompt di sistema
+            summary_messages = [summary_prompt] + messages
+            
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=summary_messages
+            )
+            
+            return response.choices[0].message.content
+            
+        except Exception as e:
+            logger.error(f"Error generating summary: {e}")
+            raise
+    
+    def _generate_solution(self, summary):
+        """Genera una soluzione dettagliata usando o1-preview basandosi sul riassunto."""
+        try:
+            # Costruisci il prompt
+            prompt = """
+            I'm working on a programming or logical task. Here's the context and problem:
+            
+            # CONTEXT
+            {}
+            
+            Please analyze this situation and:
+            1. Identify the core problem or challenge
+            2. Develop a structured approach to solve it
+            3. Provide a detailed solution with code if applicable
+            4. Explain your reasoning
+            """.format(summary)
+            
+            response = self.client.chat.completions.create(
+                model="o1-preview",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ]
+            )
+            
+            return response.choices[0].message.content
+            
+        except Exception as e:
+            logger.error(f"Error generating solution: {e}")
+            raise
+    
+    def save_conversation(self):
+        """Restituisce i dati della conversazione per il salvataggio."""
+        conversation_data = {
+            "timestamp": datetime.now().isoformat(),
+            "messages": self.chat_history
+        }
+        return conversation_data
 
-# Root route for checking API status
-@app.get("/")
-async def root():
-    return {"status": "API is running", "version": "1.0.0"}
+# Endpoint per creare una nuova sessione
+@app.route('/api/sessions', methods=['POST'])
+def create_session():
+    """Crea una nuova sessione."""
+    try:
+        session_id = str(int(time.time()))
+        active_sessions[session_id] = SessionManager(session_id)
+        
+        return jsonify({
+            "success": True,
+            "session_id": session_id,
+            "message": "Session created successfully."
+        })
+    except Exception as e:
+        logger.error(f"Error creating session: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
-# Launch the API with Uvicorn when run directly
-if __name__ == "__main__":
-    import uvicorn
-    logger.info("Starting API server...")
-    uvicorn.run("intervista_assistant.api:app", host="0.0.0.0", port=8000, reload=True) 
+# Endpoint per avviare una sessione
+@app.route('/api/sessions/<session_id>/start', methods=['POST'])
+def start_session(session_id):
+    """Avvia una sessione esistente."""
+    if session_id not in active_sessions:
+        return jsonify({
+            "success": False,
+            "error": "Session not found."
+        }), 404
+    
+    try:
+        session = active_sessions[session_id]
+        success = session.start_session()
+        
+        return jsonify({
+            "success": success,
+            "message": "Session started successfully." if success else "Session already active."
+        })
+    except Exception as e:
+        logger.error(f"Error starting session {session_id}: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+# Endpoint per terminare una sessione
+@app.route('/api/sessions/<session_id>/end', methods=['POST'])
+def end_session(session_id):
+    """Termina una sessione esistente."""
+    if session_id not in active_sessions:
+        return jsonify({
+            "success": False,
+            "error": "Session not found."
+        }), 404
+    
+    try:
+        session = active_sessions[session_id]
+        
+        # Prima terminiamo correttamente la registrazione e il thread
+        success = session.end_session()
+        
+        # Aggiungiamo un piccolo ritardo per consentire alle connessioni client di chiudersi
+        time.sleep(0.5)
+        
+        # Poi, se tutto è andato bene, rimuoviamo la sessione dalle sessioni attive
+        if success:
+            logger.info(f"Sessione {session_id} terminata con successo, rimozione dalla lista")
+            del active_sessions[session_id]
+        else:
+            logger.error(f"Impossibile terminare correttamente la sessione {session_id}")
+        
+        return jsonify({
+            "success": success,
+            "message": "Session ended successfully." if success else "Failed to end session."
+        })
+    except Exception as e:
+        logger.error(f"Error ending session {session_id}: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+# Endpoint per ottenere gli aggiornamenti di una sessione
+@app.route('/api/sessions/<session_id>/updates', methods=['GET'])
+def get_session_updates(session_id):
+    """Ottiene gli aggiornamenti di una sessione."""
+    if session_id not in active_sessions:
+        return jsonify({
+            "success": False,
+            "error": "Session not found."
+        }), 404
+    
+    try:
+        session = active_sessions[session_id]
+        update_type = request.args.get('type', None)
+        updates = session.get_updates(update_type)
+        
+        return jsonify({
+            "success": True,
+            "updates": updates
+        })
+    except Exception as e:
+        logger.error(f"Error getting updates for session {session_id}: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+# Endpoint per ottenere gli aggiornamenti in streaming usando SSE
+@app.route('/api/sessions/<session_id>/stream', methods=['GET'])
+def stream_session_updates(session_id):
+    """Ottiene gli aggiornamenti di una sessione in streaming."""
+    if session_id not in active_sessions:
+        logger.warning(f"Tentativo di streaming per sessione non esistente: {session_id}")
+        return jsonify({
+            "success": False,
+            "error": "Session not found."
+        }), 404
+    
+    def generate():
+        try:
+            session = active_sessions[session_id]
+            logger.info(f"Avvio streaming SSE per sessione {session_id}")
+            
+            while True:
+                # Verifichiamo che la sessione esista ancora e sia attiva
+                if session_id not in active_sessions:
+                    logger.info(f"Sessione {session_id} non più esistente, terminazione stream SSE")
+                    break
+                    
+                session = active_sessions[session_id]
+                if not session.recording:
+                    logger.info(f"Sessione {session_id} non più in registrazione, terminazione stream SSE")
+                    break
+                
+                # Controlla se ci sono aggiornamenti ogni 100ms
+                all_updates = session.get_updates()
+                
+                if all_updates['transcription']:
+                    for update in all_updates['transcription']:
+                        yield f"event: transcription\ndata: {json.dumps(update)}\n\n"
+                
+                if all_updates['response']:
+                    for update in all_updates['response']:
+                        yield f"event: response\ndata: {json.dumps(update)}\n\n"
+                
+                if all_updates['error']:
+                    for update in all_updates['error']:
+                        yield f"event: error\ndata: {json.dumps(update)}\n\n"
+                
+                time.sleep(0.1)
+                
+            logger.info(f"Stream SSE terminato per sessione {session_id}")
+            
+        except Exception as e:
+            logger.error(f"Errore durante lo streaming SSE per sessione {session_id}: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            yield f"event: error\ndata: {json.dumps({'timestamp': datetime.now().isoformat(), 'message': 'Server stream error'})}\n\n"
+    
+    return Response(stream_with_context(generate()), 
+                    content_type='text/event-stream')
+
+# Endpoint per inviare un messaggio di testo
+@app.route('/api/sessions/<session_id>/text', methods=['POST'])
+def send_text_message(session_id):
+    """Invia un messaggio di testo."""
+    if session_id not in active_sessions:
+        return jsonify({
+            "success": False,
+            "error": "Session not found."
+        }), 404
+    
+    try:
+        session = active_sessions[session_id]
+        data = request.get_json()
+        
+        if not data or 'text' not in data:
+            return jsonify({
+                "success": False,
+                "error": "Text message is required."
+            }), 400
+        
+        success, error = session.send_text_message(data['text'])
+        
+        return jsonify({
+            "success": success,
+            "message": "Message sent successfully." if success else error
+        })
+    except Exception as e:
+        logger.error(f"Error sending text message for session {session_id}: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+# Endpoint per acquisire e analizzare uno screenshot
+@app.route('/api/sessions/<session_id>/screenshot', methods=['POST'])
+def take_screenshot(session_id):
+    """Acquisisce e analizza uno screenshot."""
+    if session_id not in active_sessions:
+        return jsonify({
+            "success": False,
+            "error": "Session not found."
+        }), 404
+    
+    try:
+        session = active_sessions[session_id]
+        data = request.get_json() or {}
+        monitor_index = data.get('monitor_index', None)
+        
+        success, result = session.take_and_analyze_screenshot(monitor_index)
+        
+        return jsonify({
+            "success": success,
+            "message": "Screenshot analysis initiated." if success else result
+        })
+    except Exception as e:
+        logger.error(f"Error taking screenshot for session {session_id}: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+# Endpoint per avviare il processo di pensiero
+@app.route('/api/sessions/<session_id>/think', methods=['POST'])
+def start_think_process(session_id):
+    """Avvia il processo di pensiero avanzato."""
+    if session_id not in active_sessions:
+        return jsonify({
+            "success": False,
+            "error": "Session not found."
+        }), 404
+    
+    try:
+        session = active_sessions[session_id]
+        success, error = session.start_think_process()
+        
+        return jsonify({
+            "success": success,
+            "message": "Think process initiated." if success else error
+        })
+    except Exception as e:
+        logger.error(f"Error starting think process for session {session_id}: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+# Endpoint per salvare la conversazione
+@app.route('/api/sessions/<session_id>/save', methods=['GET'])
+def save_conversation(session_id):
+    """Salva la conversazione."""
+    if session_id not in active_sessions:
+        return jsonify({
+            "success": False,
+            "error": "Session not found."
+        }), 404
+    
+    try:
+        session = active_sessions[session_id]
+        conversation_data = session.save_conversation()
+        
+        return jsonify({
+            "success": True,
+            "conversation": conversation_data
+        })
+    except Exception as e:
+        logger.error(f"Error saving conversation for session {session_id}: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+# Endpoint per ottenere i monitor disponibili
+@app.route('/api/monitors', methods=['GET'])
+def get_monitors():
+    """Ottiene l'elenco dei monitor disponibili."""
+    try:
+        # Crea un'istanza temporanea di ScreenshotManager
+        screenshot_manager = ScreenshotManager()
+        monitors = screenshot_manager.get_monitors()
+        
+        return jsonify({
+            "success": True,
+            "monitors": monitors
+        })
+    except Exception as e:
+        logger.error(f"Error getting monitors: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+# Endpoint WebSocket per lo streaming audio
+@sock.route('/api/sessions/<session_id>/audio')
+def audio_websocket(ws, session_id):
+    """Gestisce la connessione WebSocket per lo streaming audio."""
+    if session_id not in active_sessions:
+        logger.error(f"WebSocket: Session {session_id} not found")
+        return
+        
+    session = active_sessions[session_id]
+    if not session.recording or not session.text_thread:
+        logger.error(f"WebSocket: Session {session_id} not recording")
+        return
+    
+    logger.info(f"WebSocket audio connection established for session {session_id}")
+    
+    try:
+        while ws.connected:
+            try:
+                # Ricevi i dati audio dal client
+                message = ws.receive()
+                
+                if message:
+                    try:
+                        # Aggiungo log per debug
+                        msg_type = type(message).__name__
+                        msg_size = len(message) if message else 0
+                        logger.debug(f"Received audio data: type={msg_type}, size={msg_size} bytes")
+                        
+                        # Converti i dati audio (gestendo sia binario che base64)
+                        if isinstance(message, str):
+                            # Se riceviamo una stringa, assumiamo che sia base64
+                            try:
+                                import base64
+                                audio_data = base64.b64decode(message)
+                                logger.debug(f"Decoded base64 data, size={len(audio_data)} bytes")
+                            except Exception as e:
+                                logger.error(f"Failed to decode base64: {e}")
+                                continue
+                        else:
+                            # Altrimenti usiamo direttamente i dati binari
+                            audio_data = message
+                        
+                        # Invia i dati audio al thread
+                        if hasattr(session.text_thread, 'add_audio_data'):
+                            session.text_thread.add_audio_data(audio_data)
+                        else:
+                            logger.error("text_thread doesn't have add_audio_data method")
+                            logger.error(f"text_thread type: {type(session.text_thread).__name__}")
+                    except Exception as e:
+                        logger.error(f"Error processing audio data: {str(e)}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+            except Exception as e:
+                logger.error(f"Error receiving message: {str(e)}")
+                # Breve pausa per evitare loop infiniti in caso di errori continui
+                import time
+                time.sleep(0.1)
+    except Exception as e:
+        logger.error(f"WebSocket error for session {session_id}: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+    finally:
+        logger.info(f"WebSocket audio connection closed for session {session_id}")
+
+# Task periodico per ripulire le sessioni inattive
+def cleanup_inactive_sessions():
+    """Rimuove le sessioni inattive."""
+    while True:
+        try:
+            current_time = datetime.now()
+            sessions_to_remove = []
+            
+            for session_id, session in active_sessions.items():
+                # Considera inattiva una sessione dopo 30 minuti
+                inactivity_period = (current_time - session.last_activity).total_seconds() / 60
+                if inactivity_period > 30:
+                    sessions_to_remove.append(session_id)
+            
+            for session_id in sessions_to_remove:
+                try:
+                    if active_sessions[session_id].recording:
+                        active_sessions[session_id].end_session()
+                    del active_sessions[session_id]
+                    logger.info(f"Removed inactive session {session_id}")
+                except Exception as e:
+                    logger.error(f"Error removing inactive session {session_id}: {str(e)}")
+        
+        except Exception as e:
+            logger.error(f"Error in cleanup task: {str(e)}")
+        
+        # Controlla ogni 5 minuti
+        time.sleep(300)
+
+# Avvia il task di pulizia in un thread separato
+cleanup_thread = threading.Thread(target=cleanup_inactive_sessions, daemon=True)
+cleanup_thread.start()
+
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=5000)

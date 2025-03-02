@@ -4,9 +4,14 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useState, useEffect, useRef } from "react"
-import { apiService, Message } from "@/utils/api"
-import { AudioRecorder } from "@/utils/audio"
+import { apiClient, TranscriptionUpdate, ResponseUpdate, ErrorUpdate, AudioStreamControl, startSessionAudio, useSessionStream } from "@/utils/api"
 import { formatMarkdown } from "@/utils/formatMessage"
+
+// Definiamo qui l'interfaccia Message per sostituire quella che era importata
+interface Message {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+}
 
 export default function ChatGPTInterface() {
   const [isSessionActive, setIsSessionActive] = useState(false)
@@ -15,342 +20,310 @@ export default function ChatGPTInterface() {
   const [inputMessage, setInputMessage] = useState("")
   const [selectedScreen, setSelectedScreen] = useState("screen1")
   const [isRecording, setIsRecording] = useState<boolean>(false)
+  const [sessionId, setSessionId] = useState<string | null>(null)
+  const [audioControl, setAudioControl] = useState<AudioStreamControl | null>(null)
+  const [isStreamError, setIsStreamError] = useState<boolean>(false)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const audioRecorderRef = useRef<AudioRecorder | null>(null)
 
-  // Configurazione del WebSocket all'avvio della sessione
-  useEffect(() => {
-    if (isSessionActive) {
-      if (!audioRecorderRef.current) {
-        audioRecorderRef.current = new AudioRecorder();
-      }
-      
-      const initMic = async () => {
-        if (audioRecorderRef.current) {
-          try {
-            await audioRecorderRef.current.initialize();
-            console.log('Microphone initialized successfully');
-          } catch (error) {
-            console.error('Failed to initialize microphone:', error);
-          }
-        }
-      };
-      
-      console.log('Inizializzazione WebSocket...');
-      const cleanup = apiService.initWebSocket(
-        // Callback per i messaggi in arrivo
-        (message) => {
-          console.log('Messaggio ricevuto dal WebSocket:', message);
+  // Utilizziamo il custom hook per lo streaming degli aggiornamenti della sessione
+  const { cleanup: cleanupStream } = useSessionStream(
+    sessionId,
+    {
+      onTranscription: (update: TranscriptionUpdate) => {
+        console.log('Trascrizione ricevuta:', update);
+        
+        // Se non è un messaggio di stato, aggiungilo come messaggio utente
+        if (!update.text.includes("Recording...") && 
+            !update.text.includes("Registrazione avviata...") && 
+            !update.text.startsWith('\n[')) {
           
-          // Se è un messaggio di debugging temporaneo, lo sostituiamo 
-          // o lo ignoriamo se è già stato processato un messaggio successivo
-          if (message.content === 'Messaggio inviato al server. In attesa di risposta...') {
-            setMessages(prev => {
-              // Se l'ultimo messaggio è già una risposta (non temporanea), ignoriamo
-              const lastMessage = prev[prev.length - 1];
-              if (lastMessage && lastMessage.role === 'assistant' && 
-                  lastMessage.content !== 'Sto elaborando la tua richiesta...' &&
-                  lastMessage.content !== message.content) {
-                return prev;
-              }
-              
-              // Altrimenti sostituiamo o aggiungiamo
-              if (lastMessage && lastMessage.role === 'assistant' && 
-                  (lastMessage.content === 'Sto elaborando la tua richiesta...' ||
-                   lastMessage.content === 'Avvio processo di analisi approfondita...')) {
-                console.log('Sostituisco il messaggio di attesa con un altro temporaneo');
-                return [...prev.slice(0, -1), message];
-              }
-              
-              return [...prev, message];
-            });
-            return;
-          }
-          
-          // Rimuovi il messaggio temporaneo se presente
           setMessages(prev => {
-            console.log('Aggiornamento dei messaggi con:', message);
-            const lastMessage = prev[prev.length - 1];
+            // Verifica se esiste già lo stesso messaggio per evitare duplicati
+            const exists = prev.some(m => m.role === 'user' && m.content === update.text);
+            if (exists) return prev;
             
-            // Se l'ultimo messaggio è temporaneo, lo sostituiamo
-            if (lastMessage && lastMessage.role === 'assistant' && 
-                (lastMessage.content === 'Sto elaborando la tua richiesta...' ||
-                 lastMessage.content === 'Avvio processo di analisi approfondita...' ||
-                 lastMessage.content === 'Messaggio inviato al server. In attesa di risposta...')) {
-              console.log('Sostituisco il messaggio temporaneo con la risposta');
-              return [...prev.slice(0, -1), message];
-            }
-            
-            console.log('Aggiungo nuovo messaggio alla lista');
-            return [...prev, message];
+            return [...prev, { role: 'user', content: update.text }];
           });
-        },
-        // Callback per la connessione
-        () => {
-          console.log('WebSocket connesso!');
-          setIsConnected(true);
-        },
-        // Callback per la disconnessione
-        () => {
-          console.log('WebSocket disconnesso!');
+        }
+      },
+      
+      onResponse: (update: ResponseUpdate) => {
+        console.log('Risposta ricevuta:', update);
+        
+        setMessages(prev => {
+          // Se l'ultimo messaggio è un messaggio di attesa dell'assistente, lo sostituiamo
+          const lastMessage = prev[prev.length - 1];
+          if (lastMessage && lastMessage.role === 'assistant' && 
+              (lastMessage.content === 'Sto elaborando la tua richiesta...' ||
+               lastMessage.content === 'Avvio processo di analisi approfondita...' ||
+               lastMessage.content === 'Messaggio inviato al server. In attesa di risposta...')) {
+            return [...prev.slice(0, -1), { role: 'assistant', content: update.text }];
+          }
+          
+          // Verifica se esiste già un messaggio assistente, aggiorna se necessario
+          const assistantIndex = prev.findIndex(m => m.role === 'assistant');
+          if (assistantIndex >= 0) {
+            // Se il contenuto è diverso, aggiungi un nuovo messaggio
+            if (prev[assistantIndex].content !== update.text) {
+              return [...prev, { role: 'assistant', content: update.text }];
+            }
+            return prev;
+          }
+          
+          // Altrimenti aggiungi un nuovo messaggio
+          return [...prev, { role: 'assistant', content: update.text }];
+        });
+      },
+      
+      onError: (update: ErrorUpdate) => {
+        console.error('Errore ricevuto:', update);
+        setMessages(prev => [
+          ...prev, 
+          { role: 'assistant', content: `Si è verificato un errore: ${update.message}` }
+        ]);
+      },
+      
+      onConnectionError: (error: Event) => {
+        console.error('Errore di connessione SSE:', error);
+        
+        // Verifichiamo se la sessione è ancora attiva prima di mostrare errori
+        // Se la sessione è stata terminata volontariamente, ignoriamo gli errori
+        if (isSessionActive && !isStreamError) {
+          setIsStreamError(true);
           setIsConnected(false);
+          setMessages(prev => [
+            ...prev,
+            { role: 'assistant', content: 'Si è verificato un errore di connessione con il server. Prova a chiudere e riaprire la sessione.' }
+          ]);
         }
-      )
-      
-      initMic();
-      
-      return () => {
-        if (audioRecorderRef.current) {
-          audioRecorderRef.current.release();
-        }
-        cleanup();
       }
     }
-  }, [isSessionActive])
+  );
 
   // Scroll automatico alla fine dei messaggi
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  // Cleanup quando il componente viene smontato
+  useEffect(() => {
+    return () => {
+      if (sessionId) {
+        // Ferma lo streaming audio, se attivo
+        audioControl?.stop();
+        // Termina la sessione quando si esce
+        apiClient.endSession(sessionId).catch(console.error);
+      }
+    };
+  }, [sessionId, audioControl]);
+
+  // Gestisce l'avvio o la chiusura della sessione
+  const toggleSession = async () => {
+    try {
+      if (isSessionActive) {
+        // Reimpostiamo il flag di errore di streaming
+        setIsStreamError(false);
+        
+        // Ferma lo streaming audio, se attivo
+        if (audioControl) {
+          audioControl.stop();
+          setAudioControl(null);
+        }
+        
+        // Termina la sessione
+        if (sessionId) {
+          // Prima chiudiamo i nostri stream
+          cleanupStream();
+          
+          // Poi chiamiamo endSession
+          await apiClient.endSession(sessionId);
+          setSessionId(null);
+        }
+        
+        setIsSessionActive(false);
+        setIsConnected(false);
+        setIsRecording(false);
+      } else {
+        try {
+          // Reimpostiamo il flag di errore di streaming
+          setIsStreamError(false);
+          
+          // Crea una nuova sessione
+          const newSessionId = await apiClient.createSession();
+          setSessionId(newSessionId);
+          
+          // Avvia la sessione
+          await apiClient.startSession(newSessionId);
+          
+          // Avvia lo streaming audio automaticamente
+          try {
+            const control = await startSessionAudio(newSessionId);
+            setAudioControl(control);
+            setIsRecording(true);
+          } catch (audioError: any) {
+            console.error("Errore nell'avvio dello streaming audio:", audioError);
+            // Continuiamo anche se lo streaming audio fallisce
+            setMessages(prev => [
+              ...prev,
+              { role: 'assistant', content: 'Non è stato possibile avviare lo streaming audio. La sessione funzionerà in modalità testo.' }
+            ]);
+          }
+          
+          setIsSessionActive(true);
+          setIsConnected(true);
+        } catch (sessionError: any) {
+          console.error("Errore nell'avvio della sessione:", sessionError);
+          setMessages(prev => [
+            ...prev,
+            { role: 'assistant', content: `Si è verificato un errore durante l'avvio della sessione: ${sessionError.message}. Verifica che il server sia in esecuzione sulla porta 8000.` }
+          ]);
+          return; // Usciamo senza cambiare lo stato
+        }
+      }
+    } catch (error: any) {
+      console.error("Errore nella gestione della sessione:", error);
+      setMessages(prev => [
+        ...prev,
+        { role: 'assistant', content: `Si è verificato un errore durante la gestione della sessione: ${error.message}` }
+      ]);
+    }
+  };
 
   // Gestisce l'invio di un messaggio
   const handleSendMessage = async () => {
-    if (!inputMessage.trim()) return
-    
-    // Comandi speciali per testing e debug
-    if (inputMessage.startsWith('/test')) {
-      testWebSocketConnection();
-      setInputMessage("");
-      return;
-    }
-    
-    if (inputMessage.startsWith('/ping')) {
-      if (isSessionActive && isConnected) {
-        apiService.sendPing();
-        setMessages(prev => [...prev, { 
-          role: 'assistant', 
-          content: 'Ping inviato al server. Controlla la console per la risposta.' 
-        }]);
-      } else {
-        setMessages(prev => [...prev, { 
-          role: 'assistant', 
-          content: 'WebSocket non connesso. Impossibile inviare ping.' 
-        }]);
-      }
-      setInputMessage("");
-      return;
-    }
+    if (!inputMessage.trim() || !sessionId) return;
     
     // Aggiungi il messaggio dell'utente
-    const userMessage: Message = { role: 'user', content: inputMessage }
-    setMessages(prev => [...prev, userMessage])
-    setInputMessage("")
+    const userMessage: Message = { role: 'user', content: inputMessage };
+    setMessages(prev => [...prev, userMessage]);
+    setInputMessage("");
     
     try {
-      console.log(`Invio messaggio, sessione attiva: ${isSessionActive}, connesso: ${isConnected}`);
-      
-      // Se la sessione è attiva, usa WebSocket, altrimenti HTTP
-      if (isSessionActive && isConnected) {
-        console.log("Invio messaggio via WebSocket");
-        console.log("Lista messaggi da inviare:", [...messages, userMessage]);
-        // Non aggiorniamo i messaggi qui perché lo faremo quando il WebSocket riceverà la risposta
-        apiService.sendMessageWs([...messages, userMessage])
-        
-        // Aggiungiamo un messaggio temporaneo di attesa
-        setMessages(prev => [
-          ...prev,
-          { role: 'assistant', content: 'Sto elaborando la tua richiesta...' }
-        ])
-      } else {
-        console.log("Invio messaggio via HTTP");
-        const response = await apiService.sendMessage([...messages, userMessage])
-        setMessages(prev => [...prev, response])
-      }
-    } catch (error) {
-      console.error("Error sending message:", error)
+      // Aggiungiamo un messaggio temporaneo di attesa
       setMessages(prev => [
         ...prev,
-        { role: 'assistant', content: 'Sorry, there was an error processing your request.' }
-      ])
+        { role: 'assistant', content: 'Sto elaborando la tua richiesta...' }
+      ]);
+      
+      // Invia il messaggio di testo
+      await apiClient.sendTextMessage(sessionId, inputMessage);
+      
+      // Non è necessario aggiungere manualmente la risposta perché verrà gestita 
+      // tramite gli eventi SSE (onResponse callback)
+    } catch (error) {
+      console.error("Errore nell'invio del messaggio:", error);
+      setMessages(prev => [
+        ...prev.slice(0, -1), // Rimuovi il messaggio di attesa
+        { role: 'assistant', content: 'Si è verificato un errore durante l\'invio del messaggio.' }
+      ]);
     }
-  }
+  };
 
   // Gestisce l'invio con il tasto Enter
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      handleSendMessage()
+      e.preventDefault();
+      handleSendMessage();
     }
-  }
+  };
 
   // Gestisce il bottone "think"
   const handleThink = async () => {
-    if (messages.length === 0) return
+    if (messages.length === 0 || !sessionId) return;
     
     try {
       // Aggiungiamo un messaggio temporaneo di attesa
       setMessages(prev => [
         ...prev,
         { role: 'assistant', content: 'Avvio processo di analisi approfondita...' }
-      ])
+      ]);
       
-      // Nota: non salviamo la risposta qui perché verrà gestita tramite WebSocket
-      await apiService.think(messages)
+      // Avvia il processo di pensiero
+      await apiClient.startThinkProcess(sessionId);
+      
+      // La risposta verrà gestita tramite gli eventi SSE
     } catch (error) {
-      console.error("Error in think process:", error)
+      console.error("Errore nel processo di analisi:", error);
       setMessages(prev => [
-        ...prev,
+        ...prev.slice(0, -1), // Rimuovi il messaggio di attesa
         { role: 'assistant', content: 'Si è verificato un errore durante il processo di analisi.' }
-      ])
+      ]);
     }
-  }
+  };
 
   // Gestisce l'analisi degli screenshot
-  const handleAnalyzeScreenshot = () => {
-    if (fileInputRef.current) {
-      fileInputRef.current.click()
-    }
-  }
-
-  // Gestisce il caricamento di un file screenshot
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files
-    if (!files || files.length === 0) return
+  const handleAnalyzeScreenshot = async () => {
+    if (!sessionId) return;
     
-    const file = files[0]
     try {
-      const response = await apiService.analyzeScreenshot(file)
-      setMessages(prev => [...prev, response])
+      // Utilizziamo l'indice del monitor selezionato
+      const monitorIndex = parseInt(selectedScreen.replace('screen', '')) - 1;
+      
+      // Aggiungiamo un messaggio temporaneo
+      setMessages(prev => [
+        ...prev,
+        { role: 'assistant', content: 'Acquisizione e analisi dello screenshot in corso...' }
+      ]);
+      
+      // Cattura e analizza lo screenshot
+      await apiClient.takeScreenshot(sessionId, monitorIndex);
+      
+      // La risposta verrà gestita tramite gli eventi SSE
     } catch (error) {
-      console.error("Error analyzing screenshot:", error)
+      console.error("Errore nell'analisi dello screenshot:", error);
+      setMessages(prev => [
+        ...prev.slice(0, -1), // Rimuovi il messaggio di attesa
+        { role: 'assistant', content: 'Si è verificato un errore durante l\'analisi dello screenshot.' }
+      ]);
     }
-    
-    // Reset input file
-    if (fileInputRef.current) {
-      fileInputRef.current.value = ""
-    }
-  }
+  };
 
   // Gestisce il salvataggio della conversazione
-  const handleSaveConversation = () => {
-    const conversationData = JSON.stringify(messages, null, 2)
-    const blob = new Blob([conversationData], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
+  const handleSaveConversation = async () => {
+    if (!sessionId) return;
     
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `conversation-${new Date().toISOString().slice(0, 10)}.json`
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
-  }
+    try {
+      const conversation = await apiClient.saveConversation(sessionId);
+      
+      // Crea e scarica il file JSON
+      const conversationData = JSON.stringify(conversation, null, 2);
+      const blob = new Blob([conversationData], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `conversation-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("Errore nel salvataggio della conversazione:", error);
+      setMessages(prev => [
+        ...prev,
+        { role: 'assistant', content: 'Si è verificato un errore durante il salvataggio della conversazione.' }
+      ]);
+    }
+  };
 
   // Gestisce il clear dei messaggi
   const handleClear = () => {
-    setMessages([])
-  }
+    setMessages([]);
+  };
 
-  // Gestisce il toggle della sessione
-  const toggleSession = () => {
-    if (isSessionActive) {
-      // Se stiamo terminando la sessione, rilasciamo le risorse
-      audioRecorderRef.current?.release();
-      setIsRecording(false);
-    } else {
-      // Se stiamo avviando la sessione, non facciamo nulla qui
-      // L'inizializzazione avviene nell'useEffect
-    }
-    setIsSessionActive(!isSessionActive);
-  }
-
-  // Funzione di debug per testare la connessione WebSocket
-  const testWebSocketConnection = () => {
-    console.log('Test della connessione WebSocket...');
-    console.log('Stato sessione:', isSessionActive);
-    console.log('Stato connessione:', isConnected);
-    
-    // Aggiungiamo un messaggio di diagnostica
-    setMessages(prev => [
-      ...prev,
-      { role: 'assistant', content: `🔍 Test diagnostico WebSocket:\n- Sessione attiva: ${isSessionActive}\n- Connessione stabilita: ${isConnected}` }
-    ]);
-    
-    if (isSessionActive && isConnected) {
-      const success = apiService.sendPing();
-      if (success) {
-        // Aggiungiamo un messaggio temporaneo per debug
-        setMessages(prev => [
-          ...prev,
-          { role: 'assistant', content: '🔄 Test WebSocket - Ping inviato al server. Controlla la console per la risposta.' }
-        ]);
-      } else {
-        setMessages(prev => [
-          ...prev,
-          { role: 'assistant', content: 'Test WebSocket fallito. Il socket non è aperto o non è inizializzato. Controlla la console.' }
-        ]);
-      }
-    } else {
-      setMessages(prev => [
-        ...prev,
-        { role: 'assistant', content: `Test WebSocket non possibile. Stato: sessione=${isSessionActive}, connesso=${isConnected}` }
-      ]);
-    }
-  }
-
-  // Funzione per avviare/fermare la registrazione audio
+  // Gestisce il toggle dello streaming audio
   const toggleRecording = () => {
+    if (!audioControl) return;
+    
     if (isRecording) {
-      stopRecording();
+      audioControl.pause();
     } else {
-      startRecording();
+      audioControl.resume();
     }
-  };
-
-  // Avvia la registrazione
-  const startRecording = () => {
-    if (audioRecorderRef.current && !isRecording) {
-      console.log('Starting recording...');
-      audioRecorderRef.current.startRecording();
-      setIsRecording(true);
-    }
-  };
-
-  // Ferma la registrazione e invia l'audio al server
-  const stopRecording = async () => {
-    if (audioRecorderRef.current && isRecording) {
-      console.log('Stopping recording...');
-      setIsRecording(false);
-      
-      try {
-        const audioBlob = await audioRecorderRef.current.stopRecording();
-        console.log('Recording stopped, blob size:', audioBlob.size);
-        
-        // Solo se l'audio ha una dimensione significativa
-        if (audioBlob.size > 1000) {
-          const audioFile = audioRecorderRef.current.createAudioFile(audioBlob);
-          
-          // Aggiungi un messaggio di caricamento
-          setMessages(prev => [...prev, { role: 'assistant', content: 'Transcribing audio...' }]);
-          
-          // Invia il file audio per la trascrizione
-          const transcription = await apiService.transcribeAudio(audioFile);
-          
-          // Aggiorna i messaggi sostituendo il messaggio di caricamento con la trascrizione
-          setMessages(prev => [...prev.slice(0, -1), transcription]);
-        } else {
-          console.log('Audio too short, ignoring');
-        }
-      } catch (error) {
-        console.error('Error processing audio:', error);
-        setMessages(prev => [...prev, { 
-          role: 'assistant', 
-          content: 'Sorry, there was an error processing your audio.' 
-        }]);
-      }
-    }
+    
+    setIsRecording(!isRecording);
   };
 
   return (
@@ -501,12 +474,12 @@ export default function ChatGPTInterface() {
               </div>
               {isSessionActive && (
                 <Button
-                  variant={isRecording ? "destructive" : "outline"}
+                  variant={isRecording ? "outline" : "destructive"}
                   size="sm"
                   className="h-8 w-8 p-0 rounded-full"
                   onClick={toggleRecording}
                 >
-                  {isRecording ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+                  {isRecording ? <Mic className="h-4 w-4" /> : <MicOff className="h-4 w-4" />}
                 </Button>
               )}
             </div>
@@ -520,7 +493,6 @@ export default function ChatGPTInterface() {
         ref={fileInputRef}
         accept="image/*"
         style={{ display: 'none' }}
-        onChange={handleFileUpload}
       />
     </div>
   )
