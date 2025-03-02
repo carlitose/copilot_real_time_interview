@@ -10,6 +10,7 @@ import logging
 import asyncio
 import base64
 from typing import List, Optional, Dict, Any
+from datetime import datetime
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -303,6 +304,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_text(json.dumps({
                         "type": "response",
                         "content": response_content
+                    }))
+                elif message_data["type"] == "ping":
+                    # Risponde a messaggi di ping per testing
+                    logger.info("Received ping message, sending pong")
+                    await websocket.send_text(json.dumps({
+                        "type": "pong",
+                        "timestamp": message_data.get("timestamp", ""),
+                        "server_time": datetime.now().isoformat()
                     }))
                 else:
                     logger.warning(f"Unknown message type: {message_data.get('type')}")

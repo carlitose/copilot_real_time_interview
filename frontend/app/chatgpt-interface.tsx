@@ -1,11 +1,11 @@
 "use client"
-import { Play, Square, Trash2, Save, Brain, Camera, Mic, MicOff } from "lucide-react"
+import { Play, Square, Trash2, Save, Brain, Camera, Bug, Mic, MicOff } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useState, useEffect, useRef } from "react"
 import { apiService, Message } from "@/lib/api"
-import { audioRecorder } from "@/lib/audio"
+import { audioRecorder, AudioRecorder } from "@/lib/audio"
 
 export default function ChatGPTInterface() {
   const [isSessionActive, setIsSessionActive] = useState(false)
@@ -14,43 +14,67 @@ export default function ChatGPTInterface() {
   const [inputMessage, setInputMessage] = useState("")
   const [selectedScreen, setSelectedScreen] = useState("screen1")
   const [isRecording, setIsRecording] = useState(false)
-  const [microphoneAccessGranted, setMicrophoneAccessGranted] = useState(false)
   
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   
-  // Inizializza il microfono all'avvio
-  useEffect(() => {
-    const initMicrophone = async () => {
-      if (audioRecorder.isSupported()) {
-        const granted = await audioRecorder.initialize();
-        setMicrophoneAccessGranted(granted);
-      }
-    };
-    
-    initMicrophone();
-    
-    // Cleanup quando il componente viene smontato
-    return () => {
-      audioRecorder.release();
-    };
-  }, []);
-  
-  // Configurazione del WebSocket all'avvio
+  // Configurazione del WebSocket all'avvio della sessione
   useEffect(() => {
     if (isSessionActive) {
+      // Inizializza il microfono quando si avvia la sessione
+      const initMicrophone = async () => {
+        if (AudioRecorder.isSupported()) {
+          await audioRecorder.initialize();
+          console.log('Microfono inizializzato con la sessione');
+          
+          // Avvio automatico della registrazione audio
+          const started = audioRecorder.startRecording();
+          if (started) {
+            setIsRecording(true);
+            console.log('Registrazione audio avviata automaticamente');
+          } else {
+            console.error('Impossibile avviare la registrazione audio automaticamente');
+          }
+        }
+      };
+      
+      initMicrophone();
+      
+      console.log('Inizializzazione WebSocket...');
       const cleanup = apiService.initWebSocket(
         // Callback per i messaggi in arrivo
         (message) => {
-          setMessages(prev => [...prev, message])
+          console.log('Messaggio ricevuto dal WebSocket:', message);
+          // Rimuovi il messaggio temporaneo se presente
+          setMessages(prev => {
+            console.log('Stato attuale dei messaggi:', prev);
+            const lastMessage = prev[prev.length - 1];
+            if (lastMessage && lastMessage.role === 'assistant' && 
+                lastMessage.content === 'Sto elaborando la tua richiesta...') {
+              console.log('Sostituisco il messaggio di attesa con la risposta');
+              return [...prev.slice(0, -1), message];
+            }
+            console.log('Aggiungo nuovo messaggio alla lista');
+            return [...prev, message];
+          });
         },
         // Callback per la connessione
-        () => setIsConnected(true),
+        () => {
+          console.log('WebSocket connesso!');
+          setIsConnected(true);
+        },
         // Callback per la disconnessione
-        () => setIsConnected(false)
+        () => {
+          console.log('WebSocket disconnesso!');
+          setIsConnected(false);
+        }
       )
       
-      return cleanup
+      return () => {
+        // Rilascia il microfono quando la sessione termina
+        audioRecorder.release();
+        cleanup();
+      }
     }
   }, [isSessionActive])
   
@@ -69,10 +93,21 @@ export default function ChatGPTInterface() {
     setInputMessage("")
     
     try {
+      console.log(`Invio messaggio, sessione attiva: ${isSessionActive}, connesso: ${isConnected}`);
+      
       // Se la sessione è attiva, usa WebSocket, altrimenti HTTP
       if (isSessionActive && isConnected) {
+        console.log("Invio messaggio via WebSocket");
+        // Non aggiorniamo i messaggi qui perché lo faremo quando il WebSocket riceverà la risposta
         apiService.sendMessageWs([...messages, userMessage])
+        
+        // Aggiungiamo un messaggio temporaneo di attesa
+        setMessages(prev => [
+          ...prev,
+          { role: 'assistant', content: 'Sto elaborando la tua richiesta...' }
+        ])
       } else {
+        console.log("Invio messaggio via HTTP");
         const response = await apiService.sendMessage([...messages, userMessage])
         setMessages(prev => [...prev, response])
       }
@@ -153,58 +188,116 @@ export default function ChatGPTInterface() {
   
   // Gestisce il toggle della sessione
   const toggleSession = () => {
-    setIsSessionActive(!isSessionActive)
+    if (isSessionActive) {
+      // Se stiamo terminando la sessione, fermiamo la registrazione e rilasciamo le risorse
+      if (isRecording) {
+        audioRecorder.stopRecording().then(audioBlob => {
+          console.log('Registrazione audio fermata con la sessione, blob size:', audioBlob.size);
+          // Non inviamo l'audio se terminiamo la sessione
+        }).catch(error => {
+          console.error('Errore durante l\'arresto della registrazione:', error);
+        }).finally(() => {
+          setIsRecording(false);
+          audioRecorder.release();
+        });
+      } else {
+        audioRecorder.release();
+      }
+    }
+    setIsSessionActive(!isSessionActive);
   }
   
-  // Gestisce l'avvio della registrazione audio
-  const handleStartRecording = () => {
-    if (!microphoneAccessGranted) {
-      console.error("Microphone access not granted");
+  // Funzione di debug per testare la connessione WebSocket
+  const testWebSocketConnection = () => {
+    console.log('Test della connessione WebSocket...');
+    console.log('Stato sessione:', isSessionActive);
+    console.log('Stato connessione:', isConnected);
+    
+    if (isSessionActive && isConnected) {
+      const success = apiService.sendPing();
+      if (success) {
+        // Aggiungiamo un messaggio temporaneo per debug
+        setMessages(prev => [
+          ...prev,
+          { role: 'assistant', content: 'Test WebSocket - Ping inviato al server. Controlla la console per la risposta.' }
+        ]);
+      } else {
+        setMessages(prev => [
+          ...prev,
+          { role: 'assistant', content: 'Test WebSocket fallito. Il socket non è aperto o non è inizializzato. Controlla la console.' }
+        ]);
+      }
+    } else {
+      setMessages(prev => [
+        ...prev,
+        { role: 'assistant', content: `Test WebSocket non possibile. Stato: sessione=${isSessionActive}, connesso=${isConnected}` }
+      ]);
+    }
+  }
+
+  // Gestisce l'arresto della registrazione e l'invio dell'audio
+  const stopAudioRecording = async () => {
+    if (!isRecording) {
+      console.error('Nessuna registrazione in corso');
       return;
     }
     
-    const success = audioRecorder.startRecording();
-    if (success) {
-      setIsRecording(true);
-    }
-  };
-  
-  // Gestisce la fine della registrazione audio
-  const handleStopRecording = async () => {
-    if (!isRecording) return;
-    
     try {
+      console.log('Arresto della registrazione audio...');
       const audioBlob = await audioRecorder.stopRecording();
-      const audioFile = audioRecorder.createAudioFile(audioBlob);
+      setIsRecording(false);
       
-      // Mostra un messaggio temporaneo
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Trascrivendo audio...' }]);
+      console.log('Registrazione completata, creazione del file audio...');
+      const audioFile = audioRecorder.createAudioFile(audioBlob, `audio_${Date.now()}.wav`);
       
-      // Trascrive l'audio
+      console.log('Invio del file audio al server per la trascrizione...');
+      // Aggiungiamo un messaggio temporaneo
+      setMessages(prev => [
+        ...prev,
+        { role: 'assistant', content: 'Trascrizione dell\'audio in corso...' }
+      ]);
+      
       const transcription = await apiService.transcribeAudio(audioFile);
       
-      // Rimuove il messaggio temporaneo
-      setMessages(prev => prev.slice(0, -1));
+      // Sostituiamo il messaggio temporaneo con la trascrizione
+      setMessages(prev => {
+        const newMessages = [...prev];
+        const lastIndex = newMessages.length - 1;
+        
+        if (lastIndex >= 0 && newMessages[lastIndex].content === 'Trascrizione dell\'audio in corso...') {
+          // Rimuoviamo il messaggio temporaneo
+          newMessages.pop();
+        }
+        
+        // Aggiungiamo la trascrizione come messaggio dell'utente
+        return [...newMessages, transcription];
+      });
       
-      // Aggiunge la trascrizione ai messaggi
-      setMessages(prev => [...prev, transcription]);
-      
-      // Invia la trascrizione al backend
+      // Inviamo il messaggio trascritto al backend
       if (isSessionActive && isConnected) {
-        apiService.sendMessageWs([...messages, transcription]);
-      } else {
-        const response = await apiService.sendMessage([...messages, transcription]);
-        setMessages(prev => [...prev, response]);
+        console.log("Invio messaggio trascritto via WebSocket");
+        const updatedMessages = [...messages, transcription];
+        apiService.sendMessageWs(updatedMessages);
+        
+        // Aggiungiamo un messaggio temporaneo di attesa
+        setMessages(prev => [
+          ...prev,
+          { role: 'assistant', content: 'Sto elaborando la tua richiesta...' }
+        ]);
       }
     } catch (error) {
-      console.error("Error processing audio recording:", error);
-    } finally {
+      console.error('Errore durante la registrazione audio:', error);
       setIsRecording(false);
     }
   };
 
   return (
     <div className="flex flex-col h-screen bg-white text-gray-800">
+      {/* Connection Status Indicator */}
+      <div className={`w-full text-center text-sm py-1 ${isConnected ? 'bg-green-500 text-white' : 'bg-yellow-500 text-black'}`}>
+        {isConnected ? 'Connesso al server in tempo reale' : 'Non connesso al server in tempo reale'}
+      </div>
+      
       {/* Chat Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-6">
         {messages.map((message, index) => (
@@ -319,6 +412,28 @@ export default function ChatGPTInterface() {
                   <Brain className="w-4 h-4" />
                   <span className="text-sm">Think</span>
                 </Button>
+                <Button 
+                  variant="ghost" 
+                  size="sm" 
+                  className="h-8 rounded-md flex items-center space-x-1 text-blue-500"
+                  onClick={testWebSocketConnection}
+                >
+                  <Bug className="w-4 h-4" />
+                  <span className="text-sm">Test WS</span>
+                </Button>
+                
+                {isSessionActive && isRecording && (
+                  <Button 
+                    variant="ghost" 
+                    size="sm" 
+                    className="h-8 rounded-md flex items-center space-x-1 text-red-500"
+                    onClick={stopAudioRecording}
+                  >
+                    <MicOff className="w-4 h-4" />
+                    <span className="text-sm">Stop Recording</span>
+                  </Button>
+                )}
+                
                 <div className="flex items-center space-x-1">
                   <Button 
                     variant="ghost" 
@@ -342,31 +457,6 @@ export default function ChatGPTInterface() {
                       <SelectItem value="screen3">Screen 3</SelectItem>
                     </SelectContent>
                   </Select>
-                  
-                  {/* Pulsanti per la registrazione audio */}
-                  {!isRecording ? (
-                    <Button 
-                      variant="ghost" 
-                      size="sm" 
-                      className="h-8 rounded-md flex items-center space-x-1"
-                      onClick={handleStartRecording}
-                      disabled={!microphoneAccessGranted}
-                      title={microphoneAccessGranted ? "Start recording" : "Microphone access not granted"}
-                    >
-                      <Mic className="w-4 h-4" />
-                      <span className="text-sm">Record Audio</span>
-                    </Button>
-                  ) : (
-                    <Button 
-                      variant="ghost" 
-                      size="sm" 
-                      className="h-8 rounded-md flex items-center space-x-1 text-red-500"
-                      onClick={handleStopRecording}
-                    >
-                      <MicOff className="w-4 h-4" />
-                      <span className="text-sm">Stop Recording</span>
-                    </Button>
-                  )}
                   
                   {/* Hidden file input for screenshot upload */}
                   <input
