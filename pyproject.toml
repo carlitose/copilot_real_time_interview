@@ -34,6 +34,9 @@ python-socketio = "^5.12.1"
 flask-socketio = "^5.5.1"
 
 
+[tool.poetry.group.dev.dependencies]
+watchdog = "^6.0.0"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"

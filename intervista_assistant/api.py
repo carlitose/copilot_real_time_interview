@@ -530,6 +530,12 @@ def require_session(f):
         session_id = request.json.get('session_id')
         if not session_id or session_id not in active_sessions:
             return jsonify({"success": False, "error": "Session not found"}), 404
+            
+        # Store the session in the request context to avoid race conditions
+        request.session_manager = active_sessions.get(session_id)
+        if not request.session_manager:
+            return jsonify({"success": False, "error": "Session disappeared during request processing"}), 404
+            
         return f(*args, **kwargs)
     return decorated_function
 
@@ -611,7 +617,9 @@ def end_session():
         return jsonify({"success": True}), 200
         
     session_id = request.json.get('session_id')
-    session = active_sessions[session_id]
+    
+    # Use the session from the request context
+    session = request.session_manager
     
     # End the session
     success = session.end_session()
@@ -619,7 +627,10 @@ def end_session():
     if success:
         # Save the conversation and remove the session
         save_success, filename = session.save_conversation()
-        del active_sessions[session_id]
+        
+        # Safely remove the session from active_sessions
+        if session_id in active_sessions:
+            del active_sessions[session_id]
         
         return jsonify({
             "success": True,
@@ -864,7 +875,15 @@ def cleanup_inactive_sessions():
     now = datetime.now()
     inactive_sessions = []
     
-    for session_id, session in active_sessions.items():
+    # Create a copy of the keys to avoid modification during iteration
+    session_ids = list(active_sessions.keys())
+    
+    for session_id in session_ids:
+        # Check if session still exists (might have been removed by other processes)
+        if session_id not in active_sessions:
+            continue
+            
+        session = active_sessions[session_id]
         inactivity_time = (now - session.last_activity).total_seconds() / 60
         
         if inactivity_time > SESSION_TIMEOUT_MINUTES:
@@ -873,17 +892,24 @@ def cleanup_inactive_sessions():
     
     for session_id in inactive_sessions:
         try:
+            # Check if session still exists
+            if session_id not in active_sessions:
+                logger.info(f"Session {session_id} already removed, skipping cleanup")
+                continue
+                
             # End the session and save the conversation
             session = active_sessions[session_id]
             session.end_session()
             session.save_conversation()
             
-            # Rimuovi la sessione
-            del active_sessions[session_id]
-            logger.info(f"Sessione inattiva {session_id} rimossa con successo")
-            
+            # Safely remove the session
+            if session_id in active_sessions:
+                del active_sessions[session_id]
+                logger.info(f"Inactive session {session_id} successfully removed")
         except Exception as e:
-            logger.error(f"Errore nella rimozione della sessione inattiva {session_id}: {str(e)}")
+            logger.error(f"Error cleaning up session {session_id}: {str(e)}")
+            # Continue with other sessions even if one fails
+            continue
 
 # Generatore SSE per gli aggiornamenti della sessione
 def session_sse_generator(session_id):

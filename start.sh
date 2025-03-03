@@ -1,5 +1,23 @@
 #!/bin/bash
 
+# Default variables
+WATCH_MODE=true
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --no-watch|-nw)
+      WATCH_MODE=false
+      shift
+      ;;
+    *)
+      echo "Unknown option: $1"
+      echo "Usage: $0 [--no-watch|-nw]"
+      exit 1
+      ;;
+  esac
+done
+
 # Kill any previous processes on the requested ports
 echo "Checking and cleaning up existing processes..."
 if lsof -i:3000 -t &> /dev/null; then
@@ -35,6 +53,17 @@ echo "Starting the backend API..."
 cd "$BACKEND_DIR" 
 # Set PYTHONPATH to include the current directory
 export PYTHONPATH="$SCRIPT_DIR:$BACKEND_DIR:$PYTHONPATH"
+
+# Set environment variables for watch mode
+if [ "$WATCH_MODE" = true ]; then
+  export FLASK_DEBUG=1
+  export FLASK_RELOADER=1
+  echo "Backend running in watch mode - will automatically reload on file changes"
+else
+  export FLASK_DEBUG=0
+  export FLASK_RELOADER=0
+fi
+
 python api_launcher.py &
 BACKEND_PID=$!
 echo "Backend started with PID: $BACKEND_PID"
@@ -63,6 +92,14 @@ cleanup() {
 
 # Handle shutdown with Ctrl+C and other signals
 trap cleanup INT TERM
+
+# Display mode information
+if [ "$WATCH_MODE" = true ]; then
+  echo "====================================================="
+  echo "Application running in WATCH MODE"
+  echo "Backend and frontend will reload automatically when files change"
+  echo "====================================================="
+fi
 
 # Keep the script running
 echo "The application is running. Press Ctrl+C to terminate."
