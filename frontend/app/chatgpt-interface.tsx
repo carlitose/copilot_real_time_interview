@@ -6,7 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useState, useEffect, useRef, useCallback } from "react"
 import { formatMarkdown } from "@/utils/formatMessage"
 
-// Importazione delle API e dei servizi
+// Importing APIs and services
 import apiClient, { Message } from "@/utils/api"
 import { useAudioStream, AudioStreamControl } from "@/utils/socketio"
 import { 
@@ -29,32 +29,31 @@ export default function ChatGPTInterface() {
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [audioControl, setAudioControl] = useState<AudioStreamControl | null>(null)
   const [isStreamError, setIsStreamError] = useState<boolean>(false)
-  const [sessionStatus, setSessionStatus] = useState<any>(null)
 
-  // Stato per tenere traccia della funzione di pulizia SSE
+  // State to keep track of the SSE cleanup function
   const [cleanupStream, setCleanupStream] = useState<(() => void) | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // Ref per il listener degli stream
+  // Ref for the stream listener
   const streamControlRef = useRef<any>(null);
 
-  // Callback per gestire le risposte di trascrizione
+  // Callback to handle transcription updates
   const handleTranscription = useCallback((update: TranscriptionUpdate) => {
-    console.log(`Ricevuto aggiornamento trascrizione: ${update.text}`);
-    // Non facciamo nulla con la trascrizione per ora
+    console.log(`Received transcription update: ${update.text}`);
+    // We do nothing with the transcription for now
   }, []);
 
-  // Callback per gestire le risposte del modello
+  // Callback to handle model responses
   const handleResponse = useCallback((update: ResponseUpdate) => {
-    console.log(`Ricevuta risposta: ${update.text}`);
+    console.log(`Received response: ${update.text}`);
     setMessages(prevMessages => {
-      // Trova l'ultimo messaggio dell'assistente
+      // Find the last assistant message
       const lastAssistantIndex = [...prevMessages].reverse().findIndex(m => m.role === 'assistant');
       
-      // Se c'è già un messaggio dell'assistente e non è la risposta finale,
-      // aggiorna quel messaggio invece di aggiungerne uno nuovo
+      // If there's already an assistant message and it's not the final response,
+      // update that message instead of adding a new one
       if (lastAssistantIndex !== -1 && !update.final) {
         const reversedIndex = lastAssistantIndex;
         const actualIndex = prevMessages.length - 1 - reversedIndex;
@@ -67,7 +66,7 @@ export default function ChatGPTInterface() {
         return newMessages;
       }
       
-      // Se è la risposta finale o non ci sono messaggi dell'assistente, aggiungi un nuovo messaggio
+      // If it's the final response or there are no assistant messages, add a new message
       if (update.final) {
         return [...prevMessages, { role: 'assistant', content: update.text }];
       }
@@ -76,30 +75,30 @@ export default function ChatGPTInterface() {
     });
   }, []);
 
-  // Callback per gestire gli errori
+  // Callback to handle errors
   const handleError = useCallback((update: ErrorUpdate) => {
-    console.error(`Errore ricevuto dallo stream: ${update.message}`);
+    console.error(`Error received from stream: ${update.message}`);
     setIsStreamError(true);
   }, []);
 
-  // Callback per gestire gli errori di connessione
+  // Callback to handle connection errors
   const handleConnectionError = useCallback((error: Event) => {
-    console.error("Errore di connessione con lo stream:", error);
+    console.error("Stream connection error:", error);
     setIsStreamError(true);
   }, []);
 
-  // Callback per gestire lo stato della connessione
+  // Callback to handle connection status
   const handleConnectionStatus = useCallback((connected: boolean) => {
-    console.log(`Stato connessione stream: ${connected ? 'connesso' : 'disconnesso'}`);
+    console.log(`Stream connection status: ${connected ? 'connected' : 'disconnected'}`);
     setIsConnected(connected);
   }, []);
 
-  // Effetto per configurare gli stream quando la sessione è attiva
+  // Effect to set up streams when the session is active
   useEffect(() => {
     if (isSessionActive && sessionId) {
-      console.log(`Configurazione degli stream per la sessione ${sessionId}...`);
+      console.log(`Setting up streams for session ${sessionId}...`);
       
-      // Non chiamare gli hook dentro useEffect
+      // Do not call hooks inside useEffect
       // const streamControl = useSessionStream(sessionId, {
       //   onTranscription: handleTranscription,
       //   onResponse: handleResponse,
@@ -108,7 +107,7 @@ export default function ChatGPTInterface() {
       //   onConnectionStatus: handleConnectionStatus
       // });
       
-      // Utilizziamo lo streamControl che è già stato creato nel corpo del componente
+      // Use the streamControl that has already been created in the component body
       setCleanupStream(() => streamControlRef.current?.cleanup);
       
       return () => {
@@ -120,7 +119,7 @@ export default function ChatGPTInterface() {
     }
   }, [isSessionActive, sessionId, handleTranscription, handleResponse, handleError, handleConnectionError, handleConnectionStatus]);
 
-  // Chiamiamo useSessionStream nel corpo del componente
+  // Call useSessionStream in the component body
   const streamControl = useSessionStream(
     sessionId || '', 
     {
@@ -132,102 +131,101 @@ export default function ChatGPTInterface() {
     }
   );
   
-  // Aggiorniamo il ref all'effetto
+  // Update the ref in the effect
   useEffect(() => {
     streamControlRef.current = streamControl;
   }, [streamControl]);
 
-  // Inizializzazione automatica della sessione all'avvio
+  // Automatically initialize the session on startup
   useEffect(() => {
     async function initializeSession() {
       try {
-        console.log("Inizializzazione automatica di una nuova sessione...");
+        console.log("Creating a new session without automatic start...");
         const newSessionId = await apiClient.createSession();
-        console.log(`Nuova sessione creata: ${newSessionId}`);
+        console.log(`New session created: ${newSessionId}`);
         setSessionId(newSessionId);
-        
-        // Avvio immediato della sessione
-        const success = await apiClient.startSession(newSessionId);
-        if (success) {
-          console.log(`Sessione ${newSessionId} avviata automaticamente`);
-          setIsSessionActive(true);
-          // Non chiamare più setupStreams qui
-        } else {
-          console.error(`Errore nell'avvio automatico della sessione ${newSessionId}`);
-        }
+        // Do not automatically start the session
       } catch (error) {
-        console.error("Errore durante l'inizializzazione della sessione:", error);
+        console.error("Error creating session:", error);
       }
     }
     
     initializeSession();
   }, []);
 
-  // Effetto per scorrere automaticamente verso il basso quando arrivano nuovi messaggi
+  // Effect to automatically scroll to the bottom when new messages arrive
   useEffect(() => {
     if (messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }, [messages]);
 
-  // Gestione dell'avvio e interruzione della sessione
+  // Handle session start and stop
   const toggleSession = async () => {
     if (isSessionActive) {
-      // Interrompi la sessione
-      console.log("Interruzione della sessione...");
+      // Stop the session
+      console.log("Stopping the session...");
       
-      // Ferma la registrazione audio se attiva
+      // Stop audio recording if active
       if (isRecording && audioControl) {
         audioControl.stop();
         setIsRecording(false);
       }
       
-      // Pulisci gli stream se necessario
+      // Clean up streams if necessary
       if (cleanupStream) {
         try {
           cleanupStream();
           setCleanupStream(null);
         } catch (error) {
-          console.error("Errore durante la pulizia degli stream:", error);
+          console.error("Error cleaning up streams:", error);
         }
       }
       
-      // Termina la sessione sul server
+      // End the session on the server
       if (sessionId) {
         await apiClient.endSession(sessionId);
         setIsSessionActive(false);
       }
     } else {
-      // Avvia una nuova sessione
-      console.log("Avvio di una nuova sessione...");
+      // Start a new session
+      console.log("Starting a new session...");
       
       let sid = sessionId;
       
       if (!sid) {
-        // Se non c'è una sessione, creane una nuova
+        // If there's no session, create a new one
         try {
           sid = await apiClient.createSession();
           setSessionId(sid);
-          console.log(`Nuova sessione creata: ${sid}`);
+          console.log(`New session created: ${sid}`);
         } catch (error) {
-          console.error("Errore nella creazione della sessione:", error);
+          console.error("Error creating session:", error);
           return;
         }
       }
       
-      // Avvia la sessione sul server
+      // Start the session on the server
       try {
         const success = await apiClient.startSession(sid);
         
         if (success) {
-          console.log(`Sessione ${sid} avviata con successo`);
+          console.log(`Session ${sid} started successfully`);
           setIsSessionActive(true);
-          // Non chiamare più setupStreams qui
+          
+          // Automatically start audio recording after a slight delay
+          // to ensure the session is fully established
+          setTimeout(() => {
+            if (!isRecording) {
+              console.log("Automatically starting audio recording...");
+              toggleRecording(); // Use the existing function
+            }
+          }, 500);
         } else {
-          console.error(`Errore nell'avvio della sessione ${sid}`);
+          console.error(`Error starting session ${sid}`);
         }
       } catch (error) {
-        console.error("Errore durante l'avvio della sessione:", error);
+        console.error("Error starting session:", error);
       }
     }
   };
@@ -236,40 +234,40 @@ export default function ChatGPTInterface() {
     if (!inputMessage.trim() || !sessionId || !isSessionActive) return;
     
     try {
-      // Aggiungi il messaggio dell'utente
+      // Add the user's message
       setMessages(prev => [...prev, { role: 'user', content: inputMessage }]);
       
-      // Aggiungi un messaggio di attesa dall'assistente
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Sto elaborando la tua richiesta...' }]);
+      // Add a waiting message from the assistant
+      setMessages(prev => [...prev, { role: 'assistant', content: 'Processing your request...' }]);
       
-      // Pulisci l'input
+      // Clear the input
       setInputMessage("");
       
-      // Invia il messaggio di testo
+      // Send the text message
       const result = await apiClient.sendTextMessage(sessionId, inputMessage);
       
       if (!result) {
-        // Rimuovi il messaggio di attesa
+        // Remove the waiting message
         setMessages(prev => prev.slice(0, prev.length - 1));
         
-        // Aggiungi messaggio di errore
+        // Add an error message
         setMessages(prev => [
           ...prev,
-          { role: 'assistant', content: 'Si è verificato un errore durante l\'invio del messaggio.' }
+          { role: 'assistant', content: 'An error occurred while sending the message.' }
         ]);
       }
       
-      // La risposta verrà gestita tramite gli eventi SSE
+      // The response will be handled via SSE events
     } catch (error) {
-      console.error("Errore nell'invio del messaggio:", error);
+      console.error("Error sending message:", error);
       
-      // Rimuovi il messaggio di attesa
+      // Remove the waiting message
       setMessages(prev => prev.slice(0, prev.length - 1));
       
-      // Aggiungi messaggio di errore
+      // Add an error message
       setMessages(prev => [
         ...prev,
-        { role: 'assistant', content: 'Si è verificato un errore durante l\'invio del messaggio.' }
+        { role: 'assistant', content: 'An error occurred while sending the message.' }
       ]);
     }
   };
@@ -285,23 +283,23 @@ export default function ChatGPTInterface() {
     if (!sessionId || !isSessionActive) return;
     
     try {
-      // Aggiungi un messaggio di attesa
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Sto pensando su questa conversazione...' }]);
+      // Add a waiting message
+      setMessages(prev => [...prev, { role: 'assistant', content: 'Thinking about this conversation...' }]);
       
-      // Avvia il processo di pensiero
+      // Start the thinking process
       await apiClient.startThinkProcess(sessionId);
       
-      // La risposta verrà gestita tramite gli eventi SSE
+      // The response will be handled via SSE events
     } catch (error) {
-      console.error("Errore nell'avvio del processo di pensiero:", error);
+      console.error("Error starting think process:", error);
       
-      // Rimuovi il messaggio di attesa
+      // Remove the waiting message
       setMessages(prev => prev.slice(0, prev.length - 1));
       
-      // Aggiungi messaggio di errore
+      // Add an error message
       setMessages(prev => [
         ...prev,
-        { role: 'assistant', content: 'Si è verificato un errore durante il processo di pensiero.' }
+        { role: 'assistant', content: 'An error occurred during the thinking process.' }
       ]);
     }
   };
@@ -310,26 +308,26 @@ export default function ChatGPTInterface() {
     if (!sessionId || !isSessionActive) return;
     
     try {
-      // Ottieni l'indice del monitor
+      // Get the monitor index
       const monitorIndex = selectedScreen.replace('screen', '');
       
-      // Aggiungi un messaggio di attesa
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Sto catturando e analizzando lo schermo...' }]);
+      // Add a waiting message
+      setMessages(prev => [...prev, { role: 'assistant', content: 'Capturing and analyzing the screen...' }]);
       
-      // Cattura e analizza lo screenshot
+      // Capture and analyze the screenshot
       await apiClient.takeScreenshot(sessionId, monitorIndex);
       
-      // La risposta verrà gestita tramite gli eventi SSE
+      // The response will be handled via SSE events
     } catch (error) {
-      console.error("Errore nella cattura dello screenshot:", error);
+      console.error("Error capturing screenshot:", error);
       
-      // Rimuovi il messaggio di attesa
+      // Remove the waiting message
       setMessages(prev => prev.slice(0, prev.length - 1));
       
-      // Aggiungi messaggio di errore
+      // Add an error message
       setMessages(prev => [
         ...prev,
-        { role: 'assistant', content: 'Si è verificato un errore durante la cattura dello screenshot.' }
+        { role: 'assistant', content: 'An error occurred while capturing the screenshot.' }
       ]);
     }
   };
@@ -340,7 +338,7 @@ export default function ChatGPTInterface() {
     try {
       const conversation = await apiClient.saveConversation(sessionId);
       
-      // Crea e scarica il file JSON
+      // Create and download the JSON file
       const conversationData = JSON.stringify(conversation, null, 2);
       const blob = new Blob([conversationData], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -353,18 +351,18 @@ export default function ChatGPTInterface() {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
       
-      // Mostra una conferma
+      // Show a confirmation
       setMessages(prev => [
         ...prev,
-        { role: 'system', content: 'Conversazione salvata con successo!' }
+        { role: 'system', content: 'Conversation saved successfully!' }
       ]);
     } catch (error) {
-      console.error("Errore nel salvataggio della conversazione:", error);
+      console.error("Error saving conversation:", error);
       
-      // Mostra un messaggio di errore
+      // Show an error message
       setMessages(prev => [
         ...prev,
-        { role: 'system', content: 'Si è verificato un errore durante il salvataggio della conversazione.' }
+        { role: 'system', content: 'An error occurred while saving the conversation.' }
       ]);
     }
   };
@@ -376,16 +374,16 @@ export default function ChatGPTInterface() {
   const toggleRecording = () => {
     if (!isSessionActive) return;
     
-    // Crea il controllo audio se non esiste
+    // Create the audio control if it doesn't exist
     if (!audioControl && sessionId) {
       const control = useAudioStream(sessionId);
       setAudioControl(control);
       
-      // Avvia la registrazione
+      // Start recording
       control.start();
       setIsRecording(true);
     } else if (audioControl) {
-      // Toggle dello stato di registrazione
+      // Toggle recording state
       if (isRecording) {
         audioControl.stop();
       } else {
@@ -399,36 +397,36 @@ export default function ChatGPTInterface() {
   return (
     <div className="flex flex-col h-screen bg-slate-950 text-slate-50">
       <header className="p-4 border-b border-slate-800 flex justify-between items-center">
-        <h1 className="text-xl font-bold">ChatGPT Integrato</h1>
+        <h1 className="text-xl font-bold">Integrated ChatGPT</h1>
         <div className="flex items-center space-x-2">
           <Select value={selectedScreen} onValueChange={setSelectedScreen}>
             <SelectTrigger className="w-[100px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="screen1">Schermo 1</SelectItem>
-              <SelectItem value="screen2">Schermo 2</SelectItem>
-              <SelectItem value="screen3">Schermo 3</SelectItem>
+              <SelectItem value="screen1">Screen 1</SelectItem>
+              <SelectItem value="screen2">Screen 2</SelectItem>
+              <SelectItem value="screen3">Screen 3</SelectItem>
             </SelectContent>
           </Select>
           <Button 
             variant={isSessionActive ? "destructive" : "default"}
             onClick={toggleSession}
-            title={isSessionActive ? "Termina sessione" : "Avvia sessione"}
+            title={isSessionActive ? "End session" : "Start session"}
           >
             {isSessionActive ? <Square size={16} /> : <Play size={16} />}
           </Button>
           <Button 
             variant="ghost" 
             onClick={handleClear}
-            title="Pulisci la chat"
+            title="Clear chat"
           >
             <Trash2 size={16} />
           </Button>
           <Button 
             variant="ghost" 
             onClick={handleSaveConversation}
-            title="Salva la conversazione"
+            title="Save conversation"
             disabled={!isSessionActive}
           >
             <Save size={16} />
@@ -459,7 +457,7 @@ export default function ChatGPTInterface() {
             size="sm"
             onClick={handleThink}
             disabled={!isSessionActive}
-            title="Pensa"
+            title="Think"
           >
             <Brain size={16} />
           </Button>
@@ -468,7 +466,7 @@ export default function ChatGPTInterface() {
             size="sm"
             onClick={handleAnalyzeScreenshot}
             disabled={!isSessionActive}
-            title="Analizza schermo"
+            title="Analyze screen"
           >
             <Camera size={16} />
           </Button>
@@ -480,18 +478,10 @@ export default function ChatGPTInterface() {
           >
             <Bug size={16} />
           </Button>
-          <Button 
-            variant={isRecording ? "destructive" : "ghost"}
-            size="sm"
-            onClick={toggleRecording}
-            disabled={!isSessionActive}
-            title={isRecording ? "Ferma registrazione" : "Inizia registrazione"}
-          >
-            {isRecording ? <MicOff size={16} /> : <Mic size={16} />}
-          </Button>
           <div className="ml-auto text-xs text-slate-400">
-            {isConnected ? 'Connesso' : 'Disconnesso'}
-            {isStreamError && ' - Errore di streaming'}
+            {isConnected ? 'Connected' : 'Disconnected'}
+            {isStreamError && ' - Streaming error'}
+            {isRecording && ' - 🎤 Recording active'}
           </div>
         </div>
         <div className="flex space-x-2">
@@ -499,7 +489,7 @@ export default function ChatGPTInterface() {
             value={inputMessage}
             onChange={(e) => setInputMessage(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Scrivi un messaggio..."
+            placeholder="Type a message..."
             disabled={!isSessionActive}
             className="bg-slate-800 border-slate-700"
           />
@@ -507,7 +497,7 @@ export default function ChatGPTInterface() {
             onClick={handleSendMessage} 
             disabled={!isSessionActive || !inputMessage.trim()}
           >
-            Invia
+            Send
           </Button>
         </div>
       </div>
