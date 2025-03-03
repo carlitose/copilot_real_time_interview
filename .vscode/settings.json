@@ -1,0 +1,15 @@
+{
+    "python.analysis.extraPaths": [
+        "./intervista_assistant"
+    ],
+    "python.linting.enabled": true,
+    "python.linting.pylintEnabled": true,
+    "python.analysis.typeCheckingMode": "off",
+    "python.analysis.diagnosticSeverityOverrides": {
+        "reportOptionalMemberAccess": "none",
+        "reportOptionalSubscript": "none",
+        "reportOperatorIssue": "none",
+        "reportAttributeAccessIssue": "none",
+        "reportMissingImports": "warning"
+    }
+} 

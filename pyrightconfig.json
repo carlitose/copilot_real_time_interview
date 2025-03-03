@@ -1,0 +1,17 @@
+{
+    "include": [
+        "intervista_assistant"
+    ],
+    "extraPaths": [
+        "./intervista_assistant"
+    ],
+    "pythonVersion": "3.10",
+    "typeCheckingMode": "off",
+    "diagnosticSeverityOverrides": {
+        "reportOptionalMemberAccess": "none",
+        "reportOptionalSubscript": "none",
+        "reportOperatorIssue": "none",
+        "reportAttributeAccessIssue": "none",
+        "reportMissingImports": "warning"
+    }
+} 
