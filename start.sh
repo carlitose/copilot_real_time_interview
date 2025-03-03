@@ -1,69 +1,69 @@
 #!/bin/bash
 
-# Uccidi eventuali processi precedenti sulle porte richieste
-echo "Controllo e pulizia di processi esistenti..."
+# Kill any previous processes on the requested ports
+echo "Checking and cleaning up existing processes..."
 if lsof -i:3000 -t &> /dev/null; then
-  echo "Terminazione dei processi sulla porta 3000..."
+  echo "Terminating processes on port 3000..."
   kill $(lsof -i:3000 -t) 2>/dev/null || true
   sleep 1
 fi
 
 if lsof -i:8000 -t &> /dev/null; then
-  echo "Terminazione dei processi sulla porta 8000..."
+  echo "Terminating processes on port 8000..."
   kill $(lsof -i:8000 -t) 2>/dev/null || true
   sleep 1
 fi
 
-# Determina il percorso della directory corrente (dove si trova lo script)
+# Determine the path of the current directory (where the script is located)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 BACKEND_DIR="$SCRIPT_DIR/intervista_assistant"
 FRONTEND_DIR="$SCRIPT_DIR/frontend"
 
-# Verifica che le directory esistano
+# Check that the directories exist
 if [ ! -d "$BACKEND_DIR" ]; then
-  echo "Directory backend non trovata: $BACKEND_DIR"
+  echo "Backend directory not found: $BACKEND_DIR"
   exit 1
 fi
 
 if [ ! -d "$FRONTEND_DIR" ]; then
-  echo "Directory frontend non trovata: $FRONTEND_DIR"
+  echo "Frontend directory not found: $FRONTEND_DIR"
   exit 1
 fi
 
-# Avvia il backend
-echo "Avvio del backend API..."
+# Start the backend
+echo "Starting the backend API..."
 cd "$BACKEND_DIR" 
-# Imposto PYTHONPATH per includere la directory corrente
+# Set PYTHONPATH to include the current directory
 export PYTHONPATH="$SCRIPT_DIR:$BACKEND_DIR:$PYTHONPATH"
 python api_launcher.py &
 BACKEND_PID=$!
-echo "Backend avviato con PID: $BACKEND_PID"
+echo "Backend started with PID: $BACKEND_PID"
 
-# Attendi che il backend sia pronto
-echo "Attendi che il backend sia pronto..."
+# Wait for the backend to be ready
+echo "Waiting for the backend to be ready..."
 sleep 5
 
-# Avvia il frontend
-echo "Avvio del frontend (Next.js)..."
+# Start the frontend
+echo "Starting the frontend (Next.js)..."
 cd "$FRONTEND_DIR" 
 npm run dev &
 FRONTEND_PID=$!
-echo "Frontend avviato con PID: $FRONTEND_PID"
+echo "Frontend started with PID: $FRONTEND_PID"
 
-# Funzione per terminare tutti i processi
+# Function to terminate all processes
 cleanup() {
-  echo 'Chiusura dei processi...'
-  # Termina tutti i processi figlio
+  echo 'Closing processes...'
+  # Terminate all child processes
   pkill -P $$ || true
-  # Termina esplicitamente i processi noti
+  # Explicitly terminate known processes
   kill $BACKEND_PID 2>/dev/null || true
   kill $FRONTEND_PID 2>/dev/null || true
   exit 0
 }
 
-# Gestione chiusura con Ctrl+C e altri segnali
+# Handle shutdown with Ctrl+C and other signals
 trap cleanup INT TERM
 
-# Mantieni lo script in esecuzione
-echo "L'applicazione è in esecuzione. Premi Ctrl+C per terminare."
+# Keep the script running
+echo "The application is running. Press Ctrl+C to terminate."
 wait 
