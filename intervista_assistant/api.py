@@ -1,85 +1,85 @@
 #!/usr/bin/env python3
+"""
+Backend API for Intervista Assistant.
+Manages communication with OpenAI models and provides endpoints for the frontend.
+Audio must always be sent via Socket.IO.
+"""
 import os
 import time
 import json
+import uuid
 import logging
-import threading
-import asyncio
 import base64
+import threading
+import numpy as np
 from datetime import datetime
-from io import BytesIO
+from functools import wraps
 
 from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
-from openai import OpenAI
-from dotenv import load_dotenv
-import numpy as np
-import pyautogui
 
-from websocket_realtime_text_thread import WebSocketRealtimeTextThread
-from utils import ScreenshotManager
-# Configurazione logging
-logging.basicConfig(level=logging.INFO, 
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    filename='api.log')
+from openai import OpenAI
+
+# Import the thread for real-time API communication with OpenAI
+try:
+    # Try to import as a module
+    from intervista_assistant.web_realtime_text_thread import WebRealtimeTextThread
+except ImportError:
+    # Local import fallback
+    from web_realtime_text_thread import WebRealtimeTextThread
+
+# Logging configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    filename='backend.log'
+)
 logger = logging.getLogger(__name__)
 
+# Flask and SocketIO initialization
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*", 
-                               "allow_headers": ["Content-Type", "Authorization"],
-                               "allow_methods": ["GET", "POST", "OPTIONS"],
-                               "expose_headers": ["Content-Type", "Authorization"],
-                               "supports_credentials": True}})
+CORS(app, resources={r"/api/*": {"origins": "*"}})
+socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Configurazione avanzata di CORS per permettere tutte le origini e metodi
-socketio = SocketIO(
-    app, 
-    cors_allowed_origins="*", 
-    async_mode='threading',
-    ping_timeout=60,
-    ping_interval=25,
-    max_http_buffer_size=1e8,  # 100MB
-    engineio_logger=True,     # Abilita il logger di Engine.IO
-    logger=True              # Abilita il logger di Socket.IO
-)
+# OpenAI client for non-real-time functionalities
+client = OpenAI()
 
-# Dizionario per gestire le sessioni attive
+# Active sessions - stored as a dictionary session_id -> SessionManager
 active_sessions = {}
 
+# Maximum inactivity time for a session (minutes)
+SESSION_TIMEOUT_MINUTES = 30
+
 class SessionManager:
-    """Classe per gestire una sessione di conversazione."""
+    """
+    Manages a conversation session, including communication with OpenAI.
+    Each session is associated with a frontend client.
+    """
     
     def __init__(self, session_id):
-        """Inizializza una nuova sessione."""
+        """Initializes a new session."""
         self.session_id = session_id
         self.recording = False
         self.text_thread = None
-        self.chat_history = []
-        self.screenshot_manager = ScreenshotManager()
-        self.client = None
-        self.connected = False
         self.last_activity = datetime.now()
+        self.chat_history = []
         
-        # Inizializza il client OpenAI
-        load_dotenv()
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OpenAI API Key not found. Set the environment variable OPENAI_API_KEY.")
-        self.client = OpenAI(api_key=api_key)
-        
-        # Crea un evento per gestire gli aggiornamenti asincroni
-        self.update_event = asyncio.Event()
+        # Queues for updates
         self.transcription_updates = []
         self.response_updates = []
         self.error_updates = []
-        
+        self.connection_updates = []
+    
     def start_session(self):
-        """Avvia una nuova sessione e inizia la registrazione."""
+        """
+        Starts a new session and prepares the connection with the OpenAI API.
+        Does not start audio recording automatically.
+        """
         if not self.recording:
             self.recording = True
             
-            # Configura i callback per la classe WebSocketRealtimeTextThread
+            # Configure callbacks for real-time API communication
             callbacks = {
                 'on_transcription': self.handle_transcription,
                 'on_response': self.handle_response,
@@ -87,97 +87,105 @@ class SessionManager:
                 'on_connection_status': self.handle_connection_status
             }
             
-            self.text_thread = WebSocketRealtimeTextThread(callbacks=callbacks)
-            self.text_thread.start()
+            # Initialize the thread for real-time communication
+            self.text_thread = WebRealtimeTextThread(callbacks=callbacks)
             
-            # Attendi la connessione prima di iniziare la registrazione
-            max_wait_time = 10  # secondi
+            # Start the thread and get a reference to it
+            thread = self.text_thread.start()
+            
+            # Wait for the connection before considering the session started
+            max_wait_time = 10  # seconds
             start_time = time.time()
-            while not self.text_thread.connected and time.time() - start_time < max_wait_time:
+            
+            # Use a lock when checking the connected status
+            while time.time() - start_time < max_wait_time:
+                # Safe way to check the connected status
+                if hasattr(self.text_thread, 'lock'):
+                    with self.text_thread.lock:
+                        if self.text_thread.connected:
+                            break
+                else:
+                    # Fallback if no lock attribute
+                    if getattr(self.text_thread, 'connected', False):
+                        break
                 time.sleep(0.1)
             
-            if not self.text_thread.connected:
+            # Check if connection was established
+            is_connected = False
+            if hasattr(self.text_thread, 'lock'):
+                with self.text_thread.lock:
+                    is_connected = self.text_thread.connected
+            else:
+                is_connected = getattr(self.text_thread, 'connected', False)
+                
+            if not is_connected:
                 logger.error(f"Connection timeout for session {self.session_id}")
                 self.recording = False
                 return False
             
-            self.text_thread.start_recording()
+            logger.info(f"Session {self.session_id} started successfully")
             return True
         return False
     
     def end_session(self):
-        """Termina la sessione corrente."""
-        logger.info(f"SessionManager.end_session chiamato per sessione {self.session_id}")
+        """Ends the current session and frees resources."""
+        logger.info(f"Ending session {self.session_id}")
         
         try:
-            # Verifica se abbiamo già terminato
+            # Check if the session is already ended
             if not self.recording and not self.text_thread:
-                logger.info(f"Sessione {self.session_id} era già terminata (recording={self.recording}, text_thread={self.text_thread is not None})")
                 return True
                 
-            # Gestione del thread di trascrizione
+            # Handle the real-time communication thread
             if self.text_thread:
-                logger.info(f"Fermando la registrazione per la sessione {self.session_id}")
+                # Stop recording if active
+                if self.text_thread.recording:
+                    self.text_thread.stop_recording()
                 
-                # Ferma la registrazione se attiva
-                try:
-                    if self.text_thread.recording:
-                        logger.info(f"Thread registrazione attivo, chiamata a stop_recording()")
-                        self.text_thread.stop_recording()
-                except Exception as e:
-                    logger.warning(f"Errore fermando la registrazione: {str(e)}")
+                # Stop the thread
+                self.text_thread.stop()
+                time.sleep(1)  # Wait a second for completion
                 
-                # Ferma il thread
-                try:
-                    logger.info(f"Fermando il thread di trascrizione")
-                    self.text_thread.stop()
-                    # Non abbiamo più wait come in QThread
-                    time.sleep(2)  # Attendi 2 secondi per il completamento
-                except Exception as e:
-                    logger.warning(f"Errore fermando il thread: {str(e)}")
-                
-                # Pulizia
+                # Cleanup
                 self.text_thread = None
-                logger.info(f"Thread rimosso")
                 
-            # Aggiorna lo stato
+            # Update the state
             self.recording = False
-            logger.info(f"Sessione {self.session_id} terminata con successo")
+            logger.info(f"Session {self.session_id} ended successfully")
             return True
             
         except Exception as e:
-            logger.error(f"Errore durante la terminazione della sessione {self.session_id}: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            # Anche in caso di errore, proviamo a ripulire lo stato
-            self.recording = False
-            self.text_thread = None
+            logger.error(f"Error ending session {self.session_id}: {str(e)}")
             return False
     
     def handle_transcription(self, text):
-        """Gestisce gli aggiornamenti di trascrizione."""
+        """Handles transcription updates from the real-time API."""
         self.last_activity = datetime.now()
-        # Non aggiungere messaggi di stato alla cronologia
-        if text != "Recording in progress..." and not text.startswith('\n[Audio processed at'):
-            if not self.chat_history or self.chat_history[-1]["role"] != "user" or self.chat_history[-1]["content"] != text:
-                self.chat_history.append({"role": "user", "content": text})
+        if not text:
+            return
+            
+        # Update chat history only for complete transcriptions
+        if text.endswith("[fine]") or text.endswith("[end]"):
+            clean_text = text.replace("[fine]", "").replace("[end]", "").strip()
+            if clean_text:
+                self.chat_history.append({"role": "user", "content": clean_text})
         
-        # Aggiungi l'aggiornamento alla coda
+        # Add the update to the queue
         timestamp = datetime.now().isoformat()
         self.transcription_updates.append({
             "timestamp": timestamp,
             "text": text
         })
         
-        logger.info(f"Transcription update: {text[:50]}...")
+        logger.info(f"Transcription: {text[:50]}...")
     
     def handle_response(self, text):
-        """Gestisce gli aggiornamenti di risposta."""
+        """Handles response updates from the real-time API."""
         self.last_activity = datetime.now()
         if not text:
             return
             
-        # Aggiorna la cronologia della chat
+        # Update chat history
         if (not self.chat_history or self.chat_history[-1]["role"] != "assistant"):
             self.chat_history.append({"role": "assistant", "content": text})
         elif self.chat_history and self.chat_history[-1]["role"] == "assistant":
@@ -185,18 +193,18 @@ class SessionManager:
             previous_content = self.chat_history[-1]["content"]
             self.chat_history[-1]["content"] = f"{previous_content}\n--- Response at {current_time} ---\n{text}"
         
-        # Aggiungi l'aggiornamento alla coda
+        # Add the update to the queue
         timestamp = datetime.now().isoformat()
         self.response_updates.append({
             "timestamp": timestamp,
             "text": text
         })
         
-        logger.info(f"Response update: {text[:50]}...")
+        logger.info(f"Response: {text[:50]}...")
     
     def handle_error(self, message):
-        """Gestisce gli aggiornamenti di errore."""
-        # Ignora alcuni errori noti che non richiedono notifica
+        """Handles error updates."""
+        # Ignore some known errors that do not require notification
         if "buffer too small" in message or "Conversation already has an active response" in message:
             logger.warning(f"Ignored error (log only): {message}")
             return
@@ -209,12 +217,16 @@ class SessionManager:
         logger.error(f"Error in session {self.session_id}: {message}")
     
     def handle_connection_status(self, connected):
-        """Gestisce gli aggiornamenti dello stato di connessione."""
-        self.connected = connected
-        logger.info(f"Connection status for session {self.session_id}: {connected}")
+        """Handles connection status updates."""
+        timestamp = datetime.now().isoformat()
+        self.connection_updates.append({
+            "timestamp": timestamp,
+            "connected": connected
+        })
+        logger.info(f"Connection status for session {self.session_id}: {'connected' if connected else 'disconnected'}")
     
     def get_updates(self, update_type=None):
-        """Restituisce gli aggiornamenti in base al tipo."""
+        """Returns updates based on the type and removes them from the queue."""
         if update_type == "transcription":
             updates = self.transcription_updates.copy()
             self.transcription_updates = []
@@ -227,717 +239,679 @@ class SessionManager:
             updates = self.error_updates.copy()
             self.error_updates = []
             return updates
+        elif update_type == "connection":
+            updates = self.connection_updates.copy()
+            self.connection_updates = []
+            return updates
         else:
-            # Restituisci tutti gli aggiornamenti
+            # Return all updates
             all_updates = {
                 "transcription": self.transcription_updates.copy(),
                 "response": self.response_updates.copy(),
-                "error": self.error_updates.copy()
+                "error": self.error_updates.copy(),
+                "connection": self.connection_updates.copy()
             }
             self.transcription_updates = []
             self.response_updates = []
             self.error_updates = []
+            self.connection_updates = []
             return all_updates
     
     def send_text_message(self, text):
-        """Invia un messaggio di testo al modello."""
-        if not self.recording or not self.text_thread or not self.text_thread.connected:
-            return False, "Not connected. Please start a session first."
+        """Sends a text message to the model."""
+        self.last_activity = datetime.now()
         
-        # Verifica che ci sia testo da inviare
-        if not text or not text.strip():
-            return False, "No text to send."
-            
-        # Aggiorna la cronologia della chat
-        self.chat_history.append({"role": "user", "content": text})
+        if not text:
+            logger.warning("Empty text message received")
+            return False
         
-        # Invia il testo attraverso il thread realtime
-        success = self.text_thread.send_text(text)
+        if not self.text_thread:
+            logger.error("No active session for sending text message")
+            return False
         
-        return success, None if success else "Unable to send message. Please try again."
-    
-    def take_and_analyze_screenshot(self, monitor_index=None):
-        """Acquisisce uno screenshot e lo invia per l'analisi."""
-        if not self.recording or not self.text_thread or not self.text_thread.connected:
-            return False, "Not connected. Please start a session first."
-        
+        # Use the WebRealtimeTextThread's send_text method
         try:
-            # Acquisisci lo screenshot
-            logger.info(f"Capturing screenshot for monitor: {monitor_index}")
-            screenshot_path = self.screenshot_manager.take_screenshot(monitor_index=monitor_index)
+            # Make sure the thread is initialized and connected
+            if hasattr(self.text_thread, 'send_text'):
+                success = self.text_thread.send_text(text)
+                if success:
+                    logger.info(f"Text message sent to model: {text[:50]}...")
+                    return True
+                else:
+                    logger.error("Failed to send text message")
+                    return False
+            else:
+                logger.error("text_thread does not have the method send_text")
+                return False
+        except Exception as e:
+            logger.error(f"Error sending text message: {str(e)}")
+            return False
+    
+    def process_screenshot(self, image_data):
+        """
+        Analyzes a screenshot using the OpenAI API.
+        
+        Args:
+            image_data: Image data in base64 format
             
-            # Preparazione dei messaggi per gpt-4o-mini con la cronologia della chat
-            with open(screenshot_path, "rb") as image_file:
-                base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+        Returns:
+            (success, response_or_error): Tuple with status and response/error
+        """
+        try:
+            # Prepare messages with history and image
+            messages = self._prepare_messages_with_history(base64_image=image_data)
             
-            # Prepara i messaggi con la cronologia
-            messages = self._prepare_messages_with_history(base64_image)
-            
-            # Avvia un thread separato per l'analisi
-            analysis_thread = threading.Thread(
+            # Perform image analysis asynchronously
+            threading.Thread(
                 target=self._analyze_image_async,
-                args=(messages, screenshot_path)
-            )
-            analysis_thread.start()
+                args=(messages, image_data),
+                daemon=True
+            ).start()
             
-            logger.info(f"Screenshot analysis initiated for session {self.session_id}")
-            return True, screenshot_path
+            return True, None
             
         except Exception as e:
-            error_msg = f"Error during screenshot capture: {str(e)}"
-            logger.error(error_msg)
-            return False, error_msg
+            error_message = f"Error processing screenshot: {str(e)}"
+            logger.error(error_message)
+            return False, error_message
     
-    def _analyze_image_async(self, messages, screenshot_path):
-        """Analizza l'immagine in modo asincrono."""
+    def _analyze_image_async(self, messages, image_data):
+        """Performs image analysis asynchronously."""
         try:
-            # Notifica che l'analisi è iniziata
-            self.handle_transcription("\n[Screenshot sent for analysis]\n")
-            
-            # Chiamata a GPT-4o-mini per analizzare l'immagine
-            logger.info(f"Sending image to gpt-4o-mini for analysis in session {self.session_id}")
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
+            response = client.chat.completions.create(
+                model="gpt-4-vision-preview",
                 messages=messages,
-                max_tokens=1000
+                max_tokens=4000
             )
             
-            # Ottieni la risposta dell'assistente
             assistant_response = response.choices[0].message.content
-            logger.info(f"Received response from gpt-4o-mini: {assistant_response[:100]}...")
             
-            # Aggiorna la risposta
+            # Add to chat history
+            self.chat_history.append({
+                "role": "assistant", 
+                "content": assistant_response
+            })
+            
+            # Send the response as an update
             self.handle_response(assistant_response)
             
-            # Invia un messaggio di contesto al thread realtime
+            # Also send a message through the real-time thread to maintain context
             if self.text_thread and self.text_thread.connected:
-                context_msg = f"[I've analyzed the screenshot of a coding exercise/technical interview question. Here's what I found: {assistant_response[:500]}... Let me know if you need more specific details or have questions about how to approach this problem.]"
-                success = self.text_thread.send_text(context_msg)
-                if success:
-                    logger.info(f"Image analysis context sent to realtime thread for session {self.session_id}")
-                else:
-                    logger.error(f"Failed to send image analysis context to realtime thread for session {self.session_id}")
+                context_msg = "[I have analyzed the screenshot you sent me. If you have specific questions, feel free to ask!]"
+                self.text_thread.send_text(context_msg)
+            
+            logger.info("Image analysis completed successfully")
             
         except Exception as e:
-            error_msg = f"Error during image analysis: {str(e)}"
-            logger.error(error_msg)
-            self.handle_error(error_msg)
+            error_message = f"Error analyzing image: {str(e)}"
+            self.handle_error(error_message)
     
     def _prepare_messages_with_history(self, base64_image=None):
-        """Prepara l'array di messaggi per gpt-4o-mini includendo la cronologia e l'immagine."""
-        messages = []
+        """Prepares messages for the API including chat history."""
+        messages = [
+            {
+                "role": "system",
+                "content": "You are an expert job interview assistant, specialized in helping candidates in real-time during interviews. Provide useful, clear, and concise advice on both technical and behavioral aspects."
+            }
+        ]
         
-        # Aggiungi il messaggio di sistema
-        messages.append({
-            "role": "system", 
-            "content": "You are a specialized assistant for technical interviews, analyzing screenshots of coding exercises and technical problems. Help the user understand the content of these screenshots in detail. Your analysis should be particularly useful for a candidate during a technical interview or coding assessment."
-        })
+        # Add chat history (last 10 messages)
+        for msg in self.chat_history[-10:]:
+            messages.append(msg.copy())
         
-        # Aggiungi la cronologia della conversazione precedente
-        history_to_include = self.chat_history[:-2] if len(self.chat_history) > 2 else []
-        messages.extend(history_to_include)
-        
-        # Aggiungi il messaggio con l'immagine
-        image_url = f"data:image/jpeg;base64,{base64_image}" if base64_image else ""
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "Please analyze this screenshot of a potential technical interview question or coding exercise. Describe what you see in detail, extract any visible code or problem statement, explain the problem if possible, and suggest approaches or ideas to solve it."},
-                {"type": "image_url", "image_url": {"url": image_url}}
+        # Add the image if present
+        if base64_image:
+            content = [
+                {
+                    "type": "text",
+                    "text": "Analyze this interview screenshot. Describe what you see, what questions/challenges are present, and provide advice on how to respond or solve the problem."
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{base64_image}"
+                    }
+                }
             ]
-        })
+            messages.append({"role": "user", "content": content})
         
         return messages
     
     def start_think_process(self):
-        """Avvia il processo di pensiero avanzato."""
+        """
+        Starts an advanced thinking process that generates a summary
+        and a detailed solution based on the conversation.
+        """
         if not self.chat_history:
-            return False, "No conversation to analyze. Please start a conversation first."
+            return False, "No conversation to analyze."
         
-        if not self.recording or not self.text_thread or not self.text_thread.connected:
-            return False, "Session not active. Please start a session first."
+        # Start the thinking process in a separate thread
+        threading.Thread(
+            target=self._process_thinking_async,
+            args=(self._prepare_messages_with_history(),),
+            daemon=True
+        ).start()
         
-        try:
-            # Notifica che l'analisi è iniziata
-            self.handle_transcription("\n[Deep analysis of the conversation in progress...]\n")
-            
-            # Prepara i messaggi per l'elaborazione
-            messages_for_processing = []
-            for msg in self.chat_history:
-                messages_for_processing.append({
-                    "role": msg["role"],
-                    "content": msg["content"]
-                })
-            
-            # Avvia un thread separato per l'analisi
-            think_thread = threading.Thread(
-                target=self._process_thinking_async,
-                args=(messages_for_processing,)
-            )
-            think_thread.start()
-            
-            logger.info(f"Think process initiated for session {self.session_id}")
-            return True, None
-            
-        except Exception as e:
-            error_msg = f"Error during think process initiation: {str(e)}"
-            logger.error(error_msg)
-            return False, error_msg
+        return True, None
     
     def _process_thinking_async(self, messages):
-        """Esegue il processo di pensiero avanzato in modo asincrono."""
+        """Performs the thinking process asynchronously."""
         try:
-            # Step 1: Genera il riassunto con GPT-4o-mini
-            logger.info(f"Generating summary with GPT-4o-mini for session {self.session_id}")
+            # First generate a summary
             summary = self._generate_summary(messages)
             
-            # Invia il riassunto
-            self.handle_response("**🧠 CONVERSATION SUMMARY (GPT-4o-mini):**\n\n" + summary)
+            # Notify the user that the summary is ready
+            self.handle_response("**🧠 CONVERSATION ANALYSIS:**\n\n" + summary)
             
-            # Step 2: Esegui l'analisi approfondita con o1-preview
-            logger.info(f"Performing in-depth analysis with o1-preview for session {self.session_id}")
+            # Generate a detailed solution based on the summary
             solution = self._generate_solution(summary)
             
-            # Invia la soluzione
-            self.handle_response("**🚀 IN-DEPTH ANALYSIS AND SOLUTION (o1-preview):**\n\n" + solution)
+            # Notify the user that the solution is ready
+            self.handle_response("**🚀 DETAILED SOLUTION:**\n\n" + solution)
             
-            # Invia un messaggio di contesto al thread realtime
+            # Also send a message through the real-time thread
             if self.text_thread and self.text_thread.connected:
-                context_msg = f"[I've completed an in-depth analysis of our conversation. I've identified the key problems and generated detailed solutions. If you have specific questions about any part of the solution, let me know!]"
-                success = self.text_thread.send_text(context_msg)
-                if success:
-                    logger.info(f"Analysis context sent to realtime thread for session {self.session_id}")
-                else:
-                    logger.error(f"Unable to send analysis context to realtime thread for session {self.session_id}")
+                context_msg = "[I have completed an in-depth analysis of our conversation, identified key issues, and generated detailed solutions. If you have specific questions, I am here to help!]"
+                self.text_thread.send_text(context_msg)
+            
+            logger.info("Thinking process completed successfully")
             
         except Exception as e:
-            error_msg = f"Error during thinking process: {str(e)}"
-            logger.error(error_msg)
-            self.handle_error(error_msg)
+            error_message = f"Error in the thinking process: {str(e)}"
+            self.handle_error(error_message)
     
     def _generate_summary(self, messages):
-        """Genera un riassunto della conversazione usando GPT-4o-mini."""
+        """Generates a summary of the conversation."""
         try:
-            # Crea un prompt per il riassunto
-            summary_prompt = {
-                "role": "system",
-                "content": """Analyze the conversation history and create a concise summary in English. 
-                Focus on:
-                1. Key problems or questions discussed
-                2. Important context
-                3. Any programming challenges mentioned
-                4. Current state of the discussion
-                
-                Your summary should be comprehensive but brief, highlighting the most important aspects 
-                that would help another AI model solve any programming or logical problems mentioned."""
-            }
+            # Prepare messages for the summary
+            summary_messages = messages.copy()
+            summary_messages.append({
+                "role": "user",
+                "content": "Analyze our conversation and create a detailed summary that includes: 1) The context of the interview 2) The main challenges/questions discussed 3) The key points of my answers 4) Areas for improvement. Be specific and detailed."
+            })
             
-            # Clona i messaggi e aggiungi il prompt di sistema
-            summary_messages = [summary_prompt] + messages
-            
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=summary_messages
+            # API call
+            response = client.chat.completions.create(
+                model="gpt-4-turbo",
+                messages=summary_messages,
+                max_tokens=2000
             )
             
-            return response.choices[0].message.content
+            summary = response.choices[0].message.content
+            logger.info("Summary generated successfully")
+            return summary
             
         except Exception as e:
-            logger.error(f"Error generating summary: {e}")
+            logger.error(f"Error generating summary: {str(e)}")
             raise
     
     def _generate_solution(self, summary):
-        """Genera una soluzione dettagliata usando o1-preview basandosi sul riassunto."""
+        """Generates a detailed solution based on the summary."""
         try:
-            # Costruisci il prompt
-            prompt = """
-            I'm working on a programming or logical task. Here's the context and problem:
+            # Prepare messages for the solution
+            solution_messages = [
+                {
+                    "role": "system",
+                    "content": "You are an expert job interview coach with extensive experience in technical and behavioral interviews. Your task is to provide detailed feedback and personalized solutions."
+                },
+                {
+                    "role": "user",
+                    "content": f"Here is a summary of my interview:\n\n{summary}\n\nBased on this summary, provide me with a detailed solution that includes: 1) Specific feedback on my answers 2) Alternative or better solutions for the discussed challenges 3) Scripts or phrases I could have used 4) Practical advice to improve in weak areas 5) Strategies for follow-up after the interview. Be specific, practical, and detailed."
+                }
+            ]
             
-            # CONTEXT
-            {}
-            
-            Please analyze this situation and:
-            1. Identify the core problem or challenge
-            2. Develop a structured approach to solve it
-            3. Provide a detailed solution with code if applicable
-            4. Explain your reasoning
-            """.format(summary)
-            
-            response = self.client.chat.completions.create(
-                model="o1-preview",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ]
+            # API call
+            response = client.chat.completions.create(
+                model="gpt-4-turbo",
+                messages=solution_messages,
+                max_tokens=4000
             )
             
-            return response.choices[0].message.content
+            solution = response.choices[0].message.content
+            logger.info("Solution generated successfully")
+            return solution
             
         except Exception as e:
-            logger.error(f"Error generating solution: {e}")
+            logger.error(f"Error generating solution: {str(e)}")
             raise
     
     def save_conversation(self):
-        """Restituisce i dati della conversazione per il salvataggio."""
-        conversation_data = {
-            "timestamp": datetime.now().isoformat(),
-            "messages": self.chat_history
-        }
-        return conversation_data
-
+        """Saves the current conversation to a file."""
+        try:
+            if not self.chat_history:
+                logger.warning(f"No conversation to save for session {self.session_id}")
+                return False, None
+            
+            # Create a timestamp for the filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"conversation_{timestamp}.json"
+            
+            # Create the saving directory if it doesn't exist
+            save_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_conversations")
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # Prepare the data to save
+            save_data = {
+                "session_id": self.session_id,
+                "timestamp": datetime.now().isoformat(),
+                "messages": self.chat_history
+            }
+            
+            # Save to file
+            filepath = os.path.join(save_dir, filename)
+            with open(filepath, 'w') as f:
+                json.dump(save_data, f, indent=2)
+            
+            logger.info(f"Conversation saved to {filepath}")
+            return True, filename
+            
+        except Exception as e:
+            logger.error(f"Error saving conversation: {str(e)}")
+            return False, None
+    
     def get_status(self):
-        """Restituisce lo stato corrente della sessione."""
+        """Returns the current status of the session."""
         return {
-            "is_active": True,
-            "is_recording": self.recording,
-            "has_text_thread": self.text_thread is not None
+            "session_id": self.session_id,
+            "recording": self.recording,
+            "connected": self.text_thread.connected if self.text_thread else False,
+            "last_activity": self.last_activity.isoformat(),
+            "message_count": len(self.chat_history)
         }
 
-# Endpoint per creare una nuova sessione
-@app.route('/api/sessions', methods=['POST'])
+# Decorator to check if the session exists
+def require_session(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        session_id = request.json.get('session_id')
+        if not session_id or session_id not in active_sessions:
+            return jsonify({"success": False, "error": "Session not found"}), 404
+        return f(*args, **kwargs)
+    return decorated_function
+
+#
+# API Endpoints
+#
+
+@app.route('/api/sessions', methods=['POST', 'OPTIONS'])
 def create_session():
-    """Crea una nuova sessione."""
-    try:
-        session_id = str(int(time.time()))
-        active_sessions[session_id] = SessionManager(session_id)
+    """Creates a new session."""
+    if request.method == 'OPTIONS':
+        return jsonify({"success": True}), 200
         
+    # Generate a new session ID if not provided
+    session_id = request.json.get('session_id', str(uuid.uuid4()))
+    
+    # Check if the session already exists
+    if session_id in active_sessions:
         return jsonify({
             "success": True,
             "session_id": session_id,
-            "message": "Session created successfully."
-        })
-    except Exception as e:
-        logger.error(f"Error creating session: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
+            "message": "Existing session reused"
+        }), 200
+    
+    # Create a new session
+    active_sessions[session_id] = SessionManager(session_id)
+    
+    return jsonify({
+        "success": True,
+        "session_id": session_id,
+        "message": "New session created"
+    }), 201
 
-# Endpoint per avviare una sessione con parametri di query
 @app.route('/api/sessions/start', methods=['POST', 'OPTIONS'])
+@require_session
 def start_session():
-    """Avvia una sessione esistente."""
-    # Gestione esplicita delle richieste OPTIONS per CORS
+    """Starts an existing session."""
     if request.method == 'OPTIONS':
-        response = app.make_default_options_response()
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-        return response
+        return jsonify({"success": True}), 200
+        
+    session_id = request.json.get('session_id')
+    session = active_sessions[session_id]
     
-    # Ottieni l'ID della sessione dal parametro di query
-    session_id = request.args.get('sessionId')
+    # Check if the session is already started
+    if session.recording:
+        return jsonify({
+            "success": True,
+            "message": "Session already started"
+        }), 200
     
-    if not session_id:
-        logger.warning("Tentativo di avviare sessione senza ID sessione")
+    # Start the session
+    success = session.start_session()
+    
+    if success:
+        return jsonify({
+            "success": True,
+            "message": "Session started successfully"
+        }), 200
+    else:
         return jsonify({
             "success": False,
-            "error": "Session ID is required."
-        }), 400
-        
-    if session_id not in active_sessions:
-        logger.warning(f"Tentativo di avviare sessione non esistente: {session_id}")
-        # Creiamo la sessione al volo se non esiste
-        active_sessions[session_id] = SessionManager(session_id)
-        logger.info(f"Creata nuova sessione: {session_id}")
-    
-    try:
-        session = active_sessions[session_id]
-        success = session.start_session()
-        logger.info(f"Sessione {session_id} avviata con successo: {success}")
-        
-        response = jsonify({
-            "success": True,
-            "message": "Session started successfully."
-        })
-        # Aggiungi CORS headers
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        return response
-    except Exception as e:
-        logger.error(f"Error starting session {session_id}: {str(e)}")
-        response = jsonify({
-            "success": False,
-            "error": str(e)
+            "error": "Unable to start the session"
         }), 500
-        # Aggiungi CORS headers anche in caso di errore
-        if isinstance(response, tuple):
-            response[0].headers['Access-Control-Allow-Origin'] = '*'
-        else:
-            response.headers['Access-Control-Allow-Origin'] = '*'
-        return response
 
-# Endpoint per terminare una sessione con parametri di query
 @app.route('/api/sessions/end', methods=['POST', 'OPTIONS'])
+@require_session
 def end_session():
-    """Termina una sessione."""
-    # Gestione esplicita delle richieste OPTIONS per CORS
+    """Ends an existing session."""
     if request.method == 'OPTIONS':
-        response = app.make_default_options_response()
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-        return response
+        return jsonify({"success": True}), 200
+        
+    session_id = request.json.get('session_id')
+    session = active_sessions[session_id]
     
-    # Ottieni l'ID della sessione dal parametro di query
-    session_id = request.args.get('sessionId')
+    # End the session
+    success = session.end_session()
     
-    if not session_id:
-        logger.warning("Tentativo di terminare sessione senza ID sessione")
-        response = jsonify({
-            "success": False,
-            "error": "Session ID is required."
-        }), 400
-        if isinstance(response, tuple):
-            response[0].headers['Access-Control-Allow-Origin'] = '*'
-        else:
-            response.headers['Access-Control-Allow-Origin'] = '*'
-        return response
-    
-    if session_id not in active_sessions:
-        logger.warning(f"Tentativo di terminare sessione non esistente: {session_id}")
-        # Per maggiore robustezza, consideriamo la chiusura di una sessione non esistente come un'operazione riuscita
-        response = jsonify({
+    if success:
+        # Save the conversation and remove the session
+        save_success, filename = session.save_conversation()
+        del active_sessions[session_id]
+        
+        return jsonify({
             "success": True,
-            "message": "Session not found, considered as already ended."
-        })
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        return response
-    
-    try:
-        session = active_sessions[session_id]
-        # Gestione più robusta degli errori nel metodo end_session
-        try:
-            session.end_session()
-        except Exception as e:
-            logger.error(f"Errore durante end_session(), ma continuo con la rimozione: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-        
-        # Rimuoviamo la sessione dalla memoria anche se ci sono stati errori in end_session
-        try:
-            del active_sessions[session_id]
-            logger.info(f"Sessione {session_id} rimossa dalla memoria")
-        except Exception as e:
-            logger.error(f"Errore rimuovendo la sessione dalla memoria: {str(e)}")
-        
-        logger.info(f"Procedura di chiusura sessione {session_id} completata")
-        
-        response = jsonify({
-            "success": True,
-            "message": "Session ended successfully."
-        })
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        return response
-    except Exception as e:
-        logger.error(f"Error ending session {session_id}: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        response = jsonify({
+            "message": "Session ended successfully",
+            "conversation_saved": save_success,
+            "filename": filename if save_success else None
+        }), 200
+    else:
+        return jsonify({
             "success": False,
-            "error": str(e)
+            "error": "Unable to end the session"
         }), 500
-        if isinstance(response, tuple):
-            response[0].headers['Access-Control-Allow-Origin'] = '*'
-        else:
-            response.headers['Access-Control-Allow-Origin'] = '*'
-        return response
 
-# Endpoint per ottenere gli aggiornamenti in streaming con parametri di query
 @app.route('/api/sessions/stream', methods=['GET'])
 def stream_session_updates():
-    """Stream degli aggiornamenti della sessione in tempo reale."""
-    # Ottieni l'ID della sessione dal parametro di query
-    session_id = request.args.get('sessionId')
+    """SSE stream for session updates."""
+    session_id = request.args.get('session_id')
     
-    if not session_id:
-        logger.warning("Tentativo di ottenere stream senza ID sessione")
-        return jsonify({
-            "success": False,
-            "error": "Session ID is required."
-        }), 400
+    if not session_id or session_id not in active_sessions:
+        return jsonify({"success": False, "error": "Session not found"}), 404
     
-    if session_id not in active_sessions:
-        logger.warning(f"Tentativo di ottenere stream per sessione non esistente: {session_id}")
-        return jsonify({
-            "success": False,
-            "error": "Session not found."
-        }), 404
-    
-    try:
-        # Usa generator function per SSE
-        return Response(
-            session_sse_generator(session_id),
-            mimetype='text/event-stream',
-            headers={
-                'Cache-Control': 'no-cache',
-                'Connection': 'keep-alive',
-                'X-Accel-Buffering': 'no',  # Per Nginx
-                'Access-Control-Allow-Origin': '*'
-            }
-        )
-    except Exception as e:
-        logger.error(f"Error setting up SSE for session {session_id}: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
+    return Response(
+        stream_with_context(session_sse_generator(session_id)),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+            'Connection': 'keep-alive'
+        }
+    )
 
-# Endpoint per inviare un messaggio di testo con parametri di query
 @app.route('/api/sessions/text', methods=['POST'])
+@require_session
 def send_text_message():
-    """Invia un messaggio di testo."""
-    # Ottieni l'ID della sessione dal parametro di query
-    session_id = request.args.get('sessionId')
+    """Sends a text message to the model."""
+    session_id = request.json.get('session_id')
+    text = request.json.get('text')
     
-    if not session_id:
-        logger.warning("Tentativo di inviare messaggio senza ID sessione")
+    if not text:
         return jsonify({
             "success": False,
-            "error": "Session ID is required."
+            "error": "No text provided"
         }), 400
     
-    if session_id not in active_sessions:
-        logger.warning(f"Tentativo di inviare messaggio a sessione non esistente: {session_id}")
-        return jsonify({
-            "success": False,
-            "error": "Session not found."
-        }), 404
+    session = active_sessions[session_id]
+    success = session.send_text_message(text)
     
-    try:
-        session = active_sessions[session_id]
-        data = request.get_json()
-        
-        if not data or 'text' not in data:
-            logger.warning(f"Messaggio di testo mancante per la sessione {session_id}")
-            return jsonify({
-                "success": False,
-                "error": "Text message is required."
-            }), 400
-        
-        logger.info(f"Invio messaggio di testo alla sessione {session_id}: '{data['text']}'")
-        success, error = session.send_text_message(data['text'])
-        
-        if not success:
-            logger.error(f"Errore nell'invio del messaggio per la sessione {session_id}: {error}")
-            return jsonify({
-                "success": False,
-                "error": error
-            }), 500
-        
-        logger.info(f"Messaggio inviato con successo alla sessione {session_id}")
-        return jsonify({
-            "success": success,
-            "message": "Message sent successfully." if success else error
-        })
-    except Exception as e:
-        logger.error(f"Error sending text message for session {session_id}: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-# Endpoint per verificare lo stato di una sessione con parametri di query
-@app.route('/api/sessions/status', methods=['GET', 'OPTIONS'])
-def get_session_status():
-    """Verifica lo stato di una sessione."""
-    # Gestione esplicita delle richieste OPTIONS per CORS
-    if request.method == 'OPTIONS':
-        response = app.make_default_options_response()
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-        return response
-    
-    # Ottieni l'ID della sessione dal parametro di query
-    session_id = request.args.get('sessionId')
-    
-    if not session_id:
-        logger.warning("Tentativo di verificare stato sessione senza ID sessione")
-        return jsonify({
-            "success": False,
-            "error": "Session ID is required."
-        }), 400
-    
-    if session_id not in active_sessions:
-        logger.warning(f"Tentativo di verificare stato sessione non esistente: {session_id}")
-        return jsonify({
-            "success": False,
-            "error": "Session not found."
-        }), 404
-    
-    try:
-        session = active_sessions[session_id]
-        status = session.get_status()
-        
+    if success:
         return jsonify({
             "success": True,
-            "status": status
-        })
-    except Exception as e:
-        logger.error(f"Error getting session status for {session_id}: {str(e)}")
+            "message": "Message sent successfully"
+        }), 200
+    else:
         return jsonify({
             "success": False,
-            "error": str(e)
+            "error": "Failed to send message to the model"
+        }), 400
+
+@app.route('/api/sessions/screenshot', methods=['POST'])
+@require_session
+def process_screenshot():
+    """Processes a screenshot sent from the frontend."""
+    session_id = request.json.get('session_id')
+    image_data = request.json.get('image_data')
+    
+    if not image_data:
+        return jsonify({
+            "success": False,
+            "error": "No image provided"
+        }), 400
+    
+    # Remove the prefix "data:image/png;base64," if present
+    if image_data.startswith('data:'):
+        image_data = image_data.split(',')[1]
+    
+    session = active_sessions[session_id]
+    success, error = session.process_screenshot(image_data)
+    
+    if success:
+        return jsonify({
+            "success": True,
+            "message": "Screenshot processed successfully"
+        }), 200
+    else:
+        return jsonify({
+            "success": False,
+            "error": error
         }), 500
+
+@app.route('/api/sessions/think', methods=['POST'])
+@require_session
+def start_think_process():
+    """Starts the advanced thinking process."""
+    session_id = request.json.get('session_id')
+    session = active_sessions[session_id]
+    
+    success, error = session.start_think_process()
+    
+    if success:
+        return jsonify({
+            "success": True,
+            "message": "Thinking process started successfully"
+        }), 200
+    else:
+        return jsonify({
+            "success": False,
+            "error": error
+        }), 400
+
+@app.route('/api/sessions/status', methods=['GET', 'OPTIONS'])
+def get_session_status():
+    """Gets the status of a session."""
+    if request.method == 'OPTIONS':
+        return jsonify({"success": True}), 200
+        
+    session_id = request.args.get('session_id')
+    
+    if not session_id or session_id not in active_sessions:
+        return jsonify({
+            "success": False,
+            "error": "Session not found"
+        }), 404
+    
+    session = active_sessions[session_id]
+    return jsonify({
+        "success": True,
+        "status": session.get_status()
+    }), 200
+
+@app.route('/api/sessions/save', methods=['POST'])
+@require_session
+def save_conversation():
+    """Saves the conversation to a JSON file."""
+    session_id = request.json.get('session_id')
+    session = active_sessions[session_id]
+    
+    success, result = session.save_conversation()
+    
+    if success:
+        return jsonify({
+            "success": True,
+            "message": "Conversation saved successfully",
+            "filename": result
+        }), 200
+    else:
+        return jsonify({
+            "success": False,
+            "error": f"Unable to save the conversation: {result}"
+        }), 500
+
+#
+# Socket.IO handlers
+#
 
 @socketio.on('connect')
 def handle_connect():
-    """Gestisce la connessione di un client Socket.IO"""
-    logger.info(f"Client connected: {request.sid}")
+    """Handles a Socket.IO client connection."""
+    logger.info(f"New Socket.IO client connected: {request.sid}")
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    """Gestisce la disconnessione di un client Socket.IO"""
-    logger.info(f"Client disconnected: {request.sid}")
+    """Handles a Socket.IO client disconnection."""
+    logger.info(f"Socket.IO client disconnected: {request.sid}")
 
 @socketio.on('audio_data')
 def handle_audio_data(session_id, audio_data):
-    """Gestisce i dati audio ricevuti dal client"""
+    """
+    Handles audio data received from the client.
+    This is the ONLY way to send audio data to the backend.
+    """
     try:
-        data_type = type(audio_data).__name__
-        data_size = len(audio_data) if isinstance(audio_data, (bytes, list)) else 'non bytes/list'
-        logger.info(f"Ricevuti dati audio per la sessione {session_id}: {data_size} bytes, tipo {data_type}")
-    
+        logger.debug(f"Received audio data for session {session_id}: {len(audio_data) if isinstance(audio_data, bytes) else 'non-binary'} bytes")
+        
         if session_id not in active_sessions:
-            logger.error(f"SocketIO: Session {session_id} not found")
-            # Creiamo una nuova sessione al volo
-            active_sessions[session_id] = SessionManager(session_id)
-            # E avviamo la sessione
-            success = active_sessions[session_id].start_session()
-            if success:
-                logger.info(f"Creata e avviata nuova sessione {session_id} al volo")
-                emit('status', {'message': 'New session created and started'})
-            else:
-                logger.error(f"Impossibile avviare la sessione {session_id}")
-                emit('error', {'message': 'Failed to start new session'})
-                return
+            logger.error(f"Session {session_id} not found")
+            emit('error', {'message': 'Session not found'})
+            return
         
         session = active_sessions[session_id]
-        # Se la sessione non è in registrazione, proviamo ad avviarla
+        
+        # Check if the session is recording
         if not session.recording or not session.text_thread:
-            logger.warning(f"SocketIO: Session {session_id} not recording, trying to start it")
-            success = session.start_session()
-            if not success:
-                logger.error(f"SocketIO: Failed to start recording for session {session_id}")
-                emit('error', {'message': 'Session not recording'})
-                return
-            else:
-                logger.info(f"SocketIO: Successfully started recording for session {session_id}")
-                emit('status', {'message': 'Session recording started'})
+            logger.warning(f"Session {session_id} not recording")
+            emit('error', {'message': 'Session not recording'})
+            return
         
         try:
-            # Gestisci i dati audio in base al formato
+            # Process audio data based on format
             if isinstance(audio_data, bytes):
-                # Usa direttamente i dati binari
+                # Use binary data directly
                 processed_audio = audio_data
-                logger.debug(f"Received binary audio data: size={len(processed_audio)} bytes")
+                logger.info(f"[AUDIO] Processing binary audio data: {len(processed_audio)} bytes")
+            elif isinstance(audio_data, str) and audio_data.startswith('data:audio'):
+                # Handle base64 encoded data URL
+                try:
+                    # Extract the actual base64 content after the comma
+                    base64_content = audio_data.split(',', 1)[1]
+                    processed_audio = base64.b64decode(base64_content)
+                    logger.info(f"[AUDIO] Decoded base64 audio data: {len(processed_audio)} bytes")
+                except Exception as e:
+                    logger.error(f"Error decoding base64 audio: {str(e)}")
+                    emit('error', {'message': 'Invalid audio format'})
+                    return
             else:
-                # Prova a interpretare come array di samples
+                # Interpret as an array of samples
                 try:
                     samples = np.array(audio_data, dtype=np.int16)
                     processed_audio = samples.tobytes()
-                    logger.debug(f"Processed audio data: samples={len(audio_data)}")
+                    logger.info(f"[AUDIO] Converted array to binary audio: {len(processed_audio)} bytes")
                 except Exception as e:
-                    logger.error(f"Error processing audio data: {e}")
-                    emit('error', {'message': 'Invalid audio data format'})
+                    logger.error(f"Error converting audio data: {str(e)}")
+                    emit('error', {'message': 'Invalid audio format'})
                     return
             
-            # Invia i dati audio al thread
+            # Send audio data to the thread
+            logger.info(f"[AUDIO] Forwarding {len(processed_audio)} bytes to WebRealtimeTextThread.add_audio_data()")
             if hasattr(session.text_thread, 'add_audio_data'):
                 success = session.text_thread.add_audio_data(processed_audio)
-                if not success:
-                    logger.warning("Failed to add audio data to thread")
+                if success:
+                    logger.info(f"[AUDIO] Successfully sent {len(processed_audio)} bytes to OpenAI via WebRealtimeTextThread")
+                else:
+                    logger.warning("[AUDIO] Unable to add audio data to the thread")
+                    emit('error', {'message': 'Unable to process audio data'})
             else:
-                logger.error("text_thread doesn't have add_audio_data method")
-                emit('error', {'message': 'Internal server error - missing add_audio_data method'})
+                logger.error("[AUDIO] text_thread does not have the method add_audio_data")
+                emit('error', {'message': 'Internal server error'})
+                
         except Exception as e:
-            logger.error(f"Error handling audio data: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            emit('error', {'message': f'Internal server error: {str(e)}'})
+            logger.error(f"Error processing audio data: {str(e)}")
+            emit('error', {'message': f'Internal error: {str(e)}'})
+            
     except Exception as outer_e:
         logger.error(f"Critical error in handle_audio_data: {str(outer_e)}")
-        import traceback
-        logger.error(traceback.format_exc())
         try:
             emit('error', {'message': 'Critical server error'})
         except:
             pass
 
-# Task periodico per ripulire le sessioni inattive
+# Periodic task to clean up inactive sessions
 def cleanup_inactive_sessions():
-    """Rimuove le sessioni inattive."""
-    while True:
+    """Removes inactive sessions."""
+    now = datetime.now()
+    inactive_sessions = []
+    
+    for session_id, session in active_sessions.items():
+        inactivity_time = (now - session.last_activity).total_seconds() / 60
+        
+        if inactivity_time > SESSION_TIMEOUT_MINUTES:
+            inactive_sessions.append(session_id)
+            logger.info(f"Session {session_id} inactive for {inactivity_time:.1f} minutes, will be removed")
+    
+    for session_id in inactive_sessions:
         try:
-            current_time = datetime.now()
-            sessions_to_remove = []
-            
-            for session_id, session in active_sessions.items():
-                # Considera inattiva una sessione dopo 30 minuti
-                inactivity_period = (current_time - session.last_activity).total_seconds() / 60
-                if inactivity_period > 30:
-                    sessions_to_remove.append(session_id)
-            
-            for session_id in sessions_to_remove:
-                try:
-                    if active_sessions[session_id].recording:
-                        active_sessions[session_id].end_session()
-                    del active_sessions[session_id]
-                    logger.info(f"Removed inactive session {session_id}")
-                except Exception as e:
-                    logger.error(f"Error removing inactive session {session_id}: {str(e)}")
-        
-        except Exception as e:
-            logger.error(f"Error in cleanup task: {str(e)}")
-        
-        # Controlla ogni 5 minuti
-        time.sleep(300)
-
-# Avvia il task di pulizia in un thread separato
-cleanup_thread = threading.Thread(target=cleanup_inactive_sessions, daemon=True)
-cleanup_thread.start()
-
-def session_sse_generator(session_id):
-    """Generator per lo streaming SSE di una sessione."""
-    try:
-        session = active_sessions[session_id]
-        logger.info(f"Avvio streaming SSE per sessione {session_id}")
-        
-        while True:
-            # Verifichiamo che la sessione esista ancora e sia attiva
-            if session_id not in active_sessions:
-                logger.info(f"Sessione {session_id} non più esistente, terminazione stream SSE")
-                break
-                
+            # End the session and save the conversation
             session = active_sessions[session_id]
-            if not session.recording:
-                logger.info(f"Sessione {session_id} non più in registrazione, terminazione stream SSE")
-                break
+            session.end_session()
+            session.save_conversation()
             
-            # Controlla se ci sono aggiornamenti ogni 100ms
-            all_updates = session.get_updates()
+            # Rimuovi la sessione
+            del active_sessions[session_id]
+            logger.info(f"Sessione inattiva {session_id} rimossa con successo")
             
-            if all_updates['transcription']:
-                for update in all_updates['transcription']:
-                    yield f"event: transcription\ndata: {json.dumps(update)}\n\n"
+        except Exception as e:
+            logger.error(f"Errore nella rimozione della sessione inattiva {session_id}: {str(e)}")
+
+# Generatore SSE per gli aggiornamenti della sessione
+def session_sse_generator(session_id):
+    """Genera eventi SSE per gli aggiornamenti della sessione."""
+    try:
+        yield "data: {\"event\": \"connected\", \"message\": \"Stream connected\"}\n\n"
+        
+        while session_id in active_sessions:
+            session = active_sessions[session_id]
+            updates = session.get_updates()
             
-            if all_updates['response']:
-                for update in all_updates['response']:
-                    yield f"event: response\ndata: {json.dumps(update)}\n\n"
+            # Invia solo se ci sono aggiornamenti
+            has_updates = any(updates[key] for key in updates)
             
-            if all_updates['error']:
-                for update in all_updates['error']:
-                    yield f"event: error\ndata: {json.dumps(update)}\n\n"
+            if has_updates:
+                yield f"data: {json.dumps(updates)}\n\n"
             
+            # Aggiorna l'attività se il client è ancora connesso
+            session.last_activity = datetime.now()
+            
+            # Pausa breve per evitare carico eccessivo
             time.sleep(0.1)
             
-        logger.info(f"Stream SSE terminato per sessione {session_id}")
-        
+    except GeneratorExit:
+        logger.info(f"Client disconnesso dallo stream SSE per la sessione {session_id}")
     except Exception as e:
-        logger.error(f"Errore durante lo streaming SSE per sessione {session_id}: {str(e)}")
-        yield f"event: error\ndata: {json.dumps({'timestamp': datetime.now().isoformat(), 'message': 'Server stream error'})}\n\n"
+        logger.error(f"Errore nello stream SSE per la sessione {session_id}: {str(e)}")
+        yield f"data: {json.dumps({'event': 'error', 'message': str(e)})}\n\n"
+
+# Avvia il task di pulizia ogni minuto
+@socketio.on('connect')
+def start_cleanup_task():
+    if not hasattr(start_cleanup_task, 'started'):
+        def run_cleanup():
+            while True:
+                time.sleep(60)  # 1 minuto
+                cleanup_inactive_sessions()
+                
+        cleanup_thread = threading.Thread(target=run_cleanup, daemon=True)
+        cleanup_thread.start()
+        start_cleanup_task.started = True
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True, host='0.0.0.0', port=8000)
+    socketio.run(app, debug=True, host='0.0.0.0', port=5000)
