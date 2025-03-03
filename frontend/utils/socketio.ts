@@ -186,7 +186,9 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
       // mediaStreamRef.current è già stato impostato
       
       // Set up AudioContext
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({
+        sampleRate: 24000  // Imposta a 24kHz come richiesto da OpenAI
+      });
       
       // Make sure audioContext is running
       if (audioContext.state !== 'running') {
@@ -195,10 +197,16 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
         console.log(`AudioContext now in state: ${audioContext.state}`);
       }
       
+      console.log(`[AUDIO] AudioContext configurato con sampling rate: ${audioContext.sampleRate}Hz`);
+      
       const source = audioContext.createMediaStreamSource(mediaStreamRef.current);
       
-      // Create a processor node to sample audio
-      processorRef.current = audioContext.createScriptProcessor(4096, 1, 1);
+      // Create a processor node to sample audio - aumentiamo il buffer size per avere più dati
+      processorRef.current = audioContext.createScriptProcessor(8192, 1, 1);  // Da 4096 a 8192 per avere chunk di dati più grandi
+      
+      // Buffer per accumulare dati audio
+      let audioAccumulatorRef: Int16Array[] = [];
+      const minimumAudioLength = 4800; // 200ms di audio a 24kHz (24000 * 0.2)
       
       // Callback called when new audio data arrives
       processorRef.current.onaudioprocess = (e: AudioProcessingEvent) => {
@@ -250,12 +258,44 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
             return;
           }
           
+          // Aggiungiamo al buffer di accumulo
+          audioAccumulatorRef.push(scaledData);
+          
+          // Calcoliamo il totale di campioni accumulati
+          const totalSamples = audioAccumulatorRef.reduce((sum, array) => sum + array.length, 0);
+          
+          // Verifichiamo se abbiamo abbastanza dati audio (almeno 200ms)
+          if (totalSamples < minimumAudioLength) {
+            console.log(`[AUDIO DEBUG] Accumulato ${totalSamples}/${minimumAudioLength} campioni, continuo ad accumulare...`);
+            return;
+          }
+          
+          // Ora abbiamo abbastanza dati, possiamo inviarli
+          // Unifichiamo tutti i frammenti in un unico array
+          const mergedArray = new Int16Array(totalSamples);
+          let offset = 0;
+          
+          for (const array of audioAccumulatorRef) {
+            mergedArray.set(array, offset);
+            offset += array.length;
+          }
+          
+          // Verifica finale che ci siano abbastanza dati
+          if (mergedArray.length < minimumAudioLength) {
+            console.log(`[AUDIO WARNING] Merged buffer too small (${mergedArray.length}/${minimumAudioLength}), skipping`);
+            return;
+          }
+          
           // Convert data to a standard JavaScript array for sending
-          const audioData = Array.from(scaledData);
+          const audioData = Array.from(mergedArray);
+          
+          // Calcoliamo la durata in ms
+          const audioDurationMs = (audioData.length / audioContext.sampleRate) * 1000;
+          console.log(`[AUDIO DEBUG] Invio ${audioData.length} campioni (${audioDurationMs.toFixed(2)}ms di audio a ${audioContext.sampleRate}Hz)`);
           
           // Send audio data to server
           const avgAmplitude = audioData.reduce((sum, val) => sum + Math.abs(val), 0) / audioData.length;
-          console.log(`Sending audio data: ${audioData.length} samples for session ${sessionIdRef.current}, average amplitude: ${avgAmplitude}`);
+          console.log(`Sending audio data: ${audioData.length} samples for session ${sessionIdRef.current}, average amplitude: ${avgAmplitude}, format: PCM 16-bit`);
           
           // Verify socket.io connection before sending
           if (!socketRef.current.connected) {
@@ -281,6 +321,9 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
               console.log(`[AUDIO WARNING] No proper acknowledgement from server`, acknowledgement);
             }
           });
+          
+          // Reset buffer accumulatore
+          audioAccumulatorRef = [];
           
           // Add a timeout to check if the server responds
           setTimeout(() => {
