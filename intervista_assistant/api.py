@@ -44,7 +44,7 @@ logger.info("Backend server started")
 # Flask and SocketIO initialization
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
-socketio = SocketIO(app, cors_allowed_origins="*", logger=True, engineio_logger=True)  # Abilitato logging per Socket.IO
+socketio = SocketIO(app, cors_allowed_origins="*", logger=False, engineio_logger=False)  # Disabilitato logging per Socket.IO
 
 # OpenAI client for non-real-time functionalities
 client = OpenAI()
