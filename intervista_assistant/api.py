@@ -680,14 +680,23 @@ def stream_session_updates():
     if not session_id or session_id not in active_sessions:
         return jsonify({"success": False, "error": "Session not found"}), 404
     
+    logger.info(f"Starting SSE stream for session {session_id}")
+    
+    # Imposta gli headers CORS necessari
+    headers = {
+        'Cache-Control': 'no-cache',
+        'X-Accel-Buffering': 'no',
+        'Connection': 'keep-alive',
+        'Content-Type': 'text/event-stream',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Methods': 'GET'
+    }
+    
     return Response(
         stream_with_context(session_sse_generator(session_id)),
         mimetype='text/event-stream',
-        headers={
-            'Cache-Control': 'no-cache',
-            'X-Accel-Buffering': 'no',
-            'Connection': 'keep-alive'
-        }
+        headers=headers
     )
 
 @app.route('/api/sessions/text', methods=['POST'])
@@ -1019,17 +1028,79 @@ def cleanup_inactive_sessions():
 def session_sse_generator(session_id):
     """Genera eventi SSE per gli aggiornamenti della sessione."""
     try:
-        yield "data: {\"event\": \"connected\", \"message\": \"Stream connected\"}\n\n"
+        logger.info(f"SSE connection established for session {session_id}")
+        
+        # Invia un messaggio di connessione iniziale
+        connection_event = json.dumps({
+            "type": "connection", 
+            "connected": True, 
+            "session_id": session_id
+        })
+        yield f"data: {connection_event}\n\n"
+        
+        # Contatore per heartbeat
+        heartbeat_counter = 0
         
         while session_id in active_sessions:
+            # Invia un heartbeat ogni 30 cicli (circa 3 secondi)
+            heartbeat_counter += 1
+            if heartbeat_counter >= 30:
+                heartbeat_counter = 0
+                yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': datetime.now().isoformat()})}\n\n"
+            
             session = active_sessions[session_id]
             updates = session.get_updates()
             
-            # Invia solo se ci sono aggiornamenti
-            has_updates = any(updates[key] for key in updates)
+            has_updates = False
             
+            # Invia gli aggiornamenti di trascrizione
+            for update in updates["transcription"]:
+                has_updates = True
+                event_data = {
+                    "type": "transcription",
+                    "text": update["text"],
+                    "session_id": session_id
+                }
+                logger.debug(f"Sending transcription update: {update['text'][:50]}...")
+                yield f"data: {json.dumps(event_data)}\n\n"
+            
+            # Invia gli aggiornamenti di risposta
+            for update in updates["response"]:
+                has_updates = True
+                event_data = {
+                    "type": "response",
+                    "text": update["text"],
+                    "session_id": session_id,
+                    "final": True  # Consideriamo tutte le risposte come finali
+                }
+                logger.info(f"Sending response to client: {update['text'][:50]}...")
+                yield f"data: {json.dumps(event_data)}\n\n"
+            
+            # Invia gli aggiornamenti di errore
+            for update in updates["error"]:
+                has_updates = True
+                event_data = {
+                    "type": "error",
+                    "message": update["message"],
+                    "session_id": session_id
+                }
+                logger.warning(f"Sending error message: {update['message']}")
+                yield f"data: {json.dumps(event_data)}\n\n"
+            
+            # Invia gli aggiornamenti di connessione
+            for update in updates["connection"]:
+                has_updates = True
+                event_data = {
+                    "type": "connection",
+                    "connected": update["connected"],
+                    "session_id": session_id
+                }
+                logger.debug(f"Sending connection update: {'connected' if update['connected'] else 'disconnected'}")
+                yield f"data: {json.dumps(event_data)}\n\n"
+            
+            # Log se abbiamo inviato qualche aggiornamento
             if has_updates:
-                yield f"data: {json.dumps(updates)}\n\n"
+                logger.debug(f"Updates sent to client for session {session_id}")
             
             # Aggiorna l'attività se il client è ancora connesso
             session.last_activity = datetime.now()
@@ -1038,10 +1109,15 @@ def session_sse_generator(session_id):
             time.sleep(0.1)
             
     except GeneratorExit:
-        logger.info(f"Client disconnesso dallo stream SSE per la sessione {session_id}")
+        logger.info(f"Client disconnected from SSE stream for session {session_id}")
     except Exception as e:
-        logger.error(f"Errore nello stream SSE per la sessione {session_id}: {str(e)}")
-        yield f"data: {json.dumps({'event': 'error', 'message': str(e)})}\n\n"
+        logger.error(f"Error in SSE stream for session {session_id}: {str(e)}")
+        error_data = {
+            "type": "error",
+            "message": str(e),
+            "session_id": session_id
+        }
+        yield f"data: {json.dumps(error_data)}\n\n"
 
 # Avvia il task di pulizia ogni minuto
 @socketio.on('connect')

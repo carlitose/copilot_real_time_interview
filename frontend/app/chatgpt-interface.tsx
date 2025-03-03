@@ -10,14 +10,14 @@ import { formatMarkdown } from "@/utils/formatMessage"
 import apiClient, { Message } from "@/utils/api"
 import { useAudioStream, AudioStreamControl } from "@/utils/socketio"
 import { 
-  useSessionStream, 
   TranscriptionUpdate, 
   ResponseUpdate, 
-  ErrorUpdate 
+  ErrorUpdate
 } from "@/utils/eventStream"
 
 // Constant for the API base URL
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/api';
+console.log("API base URL:", API_BASE_URL);
 
 export default function ChatGPTInterface() {
   const [isSessionActive, setIsSessionActive] = useState(false)
@@ -35,9 +35,9 @@ export default function ChatGPTInterface() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-
-  // Ref for the stream listener
-  const streamControlRef = useRef<any>(null);
+  
+  // Ref for EventSource
+  const eventSourceRef = useRef<EventSource | null>(null);
 
   // Callback to handle transcription updates
   const handleTranscription = useCallback((update: TranscriptionUpdate) => {
@@ -47,16 +47,23 @@ export default function ChatGPTInterface() {
 
   // Callback to handle model responses
   const handleResponse = useCallback((update: ResponseUpdate) => {
-    console.log(`Received response: ${update.text}`);
+    console.log(`Received response from server: ${update.text}`);
+    console.log(`Is final response: ${update.final ? 'yes' : 'no'}`);
+    
     setMessages(prevMessages => {
+      console.log(`Current messages count: ${prevMessages.length}`);
+      
       // Find the last assistant message
       const lastAssistantIndex = [...prevMessages].reverse().findIndex(m => m.role === 'assistant');
+      console.log(`Last assistant message index: ${lastAssistantIndex !== -1 ? prevMessages.length - 1 - lastAssistantIndex : 'none'}`);
       
       // If there's already an assistant message and it's not the final response,
       // update that message instead of adding a new one
       if (lastAssistantIndex !== -1 && !update.final) {
         const reversedIndex = lastAssistantIndex;
         const actualIndex = prevMessages.length - 1 - reversedIndex;
+        
+        console.log(`Updating existing assistant message at index: ${actualIndex}`);
         
         const newMessages = [...prevMessages];
         newMessages[actualIndex] = {
@@ -67,11 +74,12 @@ export default function ChatGPTInterface() {
       }
       
       // If it's the final response or there are no assistant messages, add a new message
-      if (update.final) {
-        return [...prevMessages, { role: 'assistant', content: update.text }];
-      }
+      console.log(`Adding new assistant message with text: ${update.text.substring(0, 50)}...`);
       
-      return prevMessages;
+      return [...prevMessages, {
+        role: 'assistant',
+        content: update.text
+      }];
     });
   }, []);
 
@@ -93,48 +101,110 @@ export default function ChatGPTInterface() {
     setIsConnected(connected);
   }, []);
 
-  // Effect to set up streams when the session is active
+  // Effect to set up and clean up event stream
   useEffect(() => {
-    if (isSessionActive && sessionId) {
-      console.log(`Setting up streams for session ${sessionId}...`);
-      
-      // Do not call hooks inside useEffect
-      // const streamControl = useSessionStream(sessionId, {
-      //   onTranscription: handleTranscription,
-      //   onResponse: handleResponse,
-      //   onError: handleError,
-      //   onConnectionError: handleConnectionError,
-      //   onConnectionStatus: handleConnectionStatus
-      // });
-      
-      // Use the streamControl that has already been created in the component body
-      setCleanupStream(() => streamControlRef.current?.cleanup);
-      
-      return () => {
-        if (streamControlRef.current) {
-          streamControlRef.current.cleanup();
-          streamControlRef.current = null;
-        }
-      };
+    // Cleanup any existing EventSource
+    if (eventSourceRef.current) {
+      console.log('Closing existing EventSource');
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
     }
-  }, [isSessionActive, sessionId, handleTranscription, handleResponse, handleError, handleConnectionError, handleConnectionStatus]);
-
-  // Call useSessionStream in the component body
-  const streamControl = useSessionStream(
-    sessionId || '', 
-    {
-      onTranscription: handleTranscription,
-      onResponse: handleResponse,
-      onError: handleError, 
-      onConnectionError: handleConnectionError,
-      onConnectionStatus: handleConnectionStatus
+    
+    if (sessionId && isSessionActive) {
+      console.log(`Setting up SSE stream for session ${sessionId}`);
+      
+      try {
+        // Create EventSource for SSE
+        const eventSourceUrl = `${API_BASE_URL}/sessions/stream?session_id=${sessionId}`;
+        console.log(`Connecting to SSE endpoint: ${eventSourceUrl}`);
+        
+        const eventSource = new EventSource(eventSourceUrl);
+        eventSourceRef.current = eventSource;
+        
+        console.log("EventSource created:", eventSource);
+        
+        // Setup message handler
+        eventSource.onmessage = (event) => {
+          console.log(`[DEBUG] Raw SSE message received:`, event.data);
+          
+          try {
+            const data = JSON.parse(event.data);
+            console.log(`[DEBUG] Parsed SSE data:`, data);
+            
+            if (data.type === 'response') {
+              handleResponse({
+                type: 'response',
+                text: data.text,
+                session_id: data.session_id,
+                final: data.final || true
+              });
+            } else if (data.type === 'transcription') {
+              handleTranscription({
+                type: 'transcription',
+                text: data.text,
+                session_id: data.session_id
+              });
+            } else if (data.type === 'error') {
+              handleError({
+                type: 'error',
+                message: data.message,
+                session_id: data.session_id
+              });
+            } else if (data.type === 'connection') {
+              handleConnectionStatus(data.connected);
+            } else if (data.type === 'heartbeat') {
+              console.log(`[DEBUG] Heartbeat received: ${data.timestamp}`);
+            }
+          } catch (error) {
+            console.error('[DEBUG] Error parsing SSE data:', error);
+          }
+        };
+        
+        // Setup error handler
+        eventSource.onerror = (error) => {
+          console.error('[DEBUG] EventSource error:', error);
+          handleConnectionError(error);
+        };
+        
+        // Setup open handler
+        eventSource.onopen = () => {
+          console.log('[DEBUG] EventSource connection opened');
+          handleConnectionStatus(true);
+        };
+        
+        // Save cleanup function
+        setCleanupStream(() => {
+          return () => {
+            console.log('[DEBUG] Cleaning up EventSource');
+            if (eventSourceRef.current) {
+              eventSourceRef.current.close();
+              eventSourceRef.current = null;
+            }
+          };
+        });
+      } catch (error) {
+        console.error('[DEBUG] Error setting up SSE stream:', error);
+        setIsStreamError(true);
+      }
     }
-  );
-  
-  // Update the ref in the effect
-  useEffect(() => {
-    streamControlRef.current = streamControl;
-  }, [streamControl]);
+    
+    // Cleanup function
+    return () => {
+      console.log('Cleaning up SSE stream on component unmount');
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+    };
+  }, [
+    sessionId,
+    isSessionActive,
+    handleTranscription,
+    handleResponse,
+    handleError,
+    handleConnectionStatus,
+    handleConnectionError
+  ]);
 
   // Automatically initialize the session on startup
   useEffect(() => {
@@ -525,4 +595,6 @@ export default function ChatGPTInterface() {
     </div>
   )
 }
+
+
 

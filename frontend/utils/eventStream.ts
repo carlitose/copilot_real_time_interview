@@ -73,38 +73,65 @@ class EventStreamManager {
     // Chiudi eventuali fonti di eventi esistenti
     this.disconnect();
 
+    console.log(`[EventStream] Connecting to SSE endpoint for session ${this.sessionId}`);
+    
     // Crea un nuovo EventSource per gli eventi SSE
     this.eventSource = new EventSource(`${API_BASE_URL}/sessions/stream?session_id=${this.sessionId}`);
     
     // Gestore generico per i messaggi
     this.eventSource.onmessage = (event) => {
+      console.log(`[EventStream] Raw event received: ${event.data}`);
+      
       try {
-        const data = JSON.parse(event.data) as Update;
+        const data = JSON.parse(event.data);
+        
+        // Verifichiamo che ci sia un tipo definito
+        if (!data || typeof data !== 'object' || !('type' in data)) {
+          console.warn('[EventStream] Received data without type property:', data);
+          return;
+        }
+        
+        console.log(`[EventStream] Parsed event type: ${data.type}`);
         
         // Distribuisci i messaggi in base al tipo
         switch (data.type) {
           case 'transcription':
-            this.callbacks.onTranscription?.(data);
+            console.log(`[EventStream] Transcription received: ${(data as TranscriptionUpdate).text.substring(0, 30)}...`);
+            this.callbacks.onTranscription?.(data as TranscriptionUpdate);
             break;
           case 'response':
-            this.callbacks.onResponse?.(data);
+            console.log(`[EventStream] Response received: ${(data as ResponseUpdate).text.substring(0, 30)}...`);
+            this.callbacks.onResponse?.(data as ResponseUpdate);
             break;
           case 'error':
-            this.callbacks.onError?.(data);
+            console.log(`[EventStream] Error received: ${(data as ErrorUpdate).message}`);
+            this.callbacks.onError?.(data as ErrorUpdate);
             break;
           case 'connection':
-            this.callbacks.onConnectionStatus?.(data.connected);
+            console.log(`[EventStream] Connection status: ${(data as ConnectionUpdate).connected ? 'connected' : 'disconnected'}`);
+            this.callbacks.onConnectionStatus?.((data as ConnectionUpdate).connected);
             break;
+          default:
+            console.log(`[EventStream] Unknown event type: ${data.type}`);
         }
       } catch (error) {
-        console.error('Errore nel parsing del messaggio SSE:', error);
+        console.error('[EventStream] Errore nel parsing del messaggio SSE:', error);
+        console.error('[EventStream] Raw message data:', event.data);
       }
     };
     
     // Gestione degli errori
-    if (this.callbacks.onConnectionError) {
-      this.eventSource.onerror = this.callbacks.onConnectionError;
-    }
+    this.eventSource.onerror = (error) => {
+      console.error('[EventStream] SSE connection error:', error);
+      if (this.callbacks.onConnectionError) {
+        this.callbacks.onConnectionError(error);
+      }
+    };
+    
+    // Gestione della connessione aperta
+    this.eventSource.onopen = () => {
+      console.log('[EventStream] SSE connection opened');
+    };
   }
 
   /**
@@ -125,33 +152,43 @@ class EventStreamManager {
  * @returns Controlli per lo stream di eventi
  */
 export function useSessionStream(sessionId: string, callbacks: StreamCallbacks): StreamControl {
-  // Utilizza useRef per mantenere un riferimento alla classe EventStreamManager
+  // Creiamo un ref per mantenere il manager tra i rendering
   const managerRef = useRef<EventStreamManager | null>(null);
   
-  // Effetto per gestire la connessione
+  // Utilizziamo useEffect per gestire il ciclo di vita della connessione
   useEffect(() => {
-    if (!sessionId) return;
+    // Verifichiamo che sia presente un ID sessione valido
+    if (!sessionId) {
+      return;
+    }
     
-    // Crea un nuovo manager
+    console.log(`[EventStream] Initializing connection for session ${sessionId}`);
+    
+    // Creiamo una nuova istanza del manager
     const manager = new EventStreamManager(sessionId, callbacks);
     managerRef.current = manager;
     
-    // Inizia a gestire gli eventi
+    // Avviamo la connessione
     manager.connect();
     
-    // Pulizia al dismount del componente
+    // Funzione di pulizia che viene eseguita quando il componente viene smontato
+    // o quando le dipendenze cambiano
     return () => {
+      console.log(`[EventStream] Cleaning up connection for session ${sessionId}`);
       if (managerRef.current) {
         managerRef.current.disconnect();
+        managerRef.current = null;
       }
     };
-  }, [sessionId, callbacks]);
-
-  // Ritorna i controlli dello stream
+  }, [sessionId, callbacks]); // Dipendenze dell'effetto
+  
+  // Restituiamo un oggetto con i controlli per lo stream
   return {
     cleanup: () => {
+      console.log(`[EventStream] Manual cleanup for session ${sessionId}`);
       if (managerRef.current) {
         managerRef.current.disconnect();
+        managerRef.current = null;
       }
     }
   };
