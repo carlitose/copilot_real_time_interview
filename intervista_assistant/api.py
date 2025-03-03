@@ -16,8 +16,8 @@ from openai import OpenAI
 from dotenv import load_dotenv
 import numpy as np
 
-from .websocket_realtime_text_thread import WebSocketRealtimeTextThread
-from .utils import ScreenshotManager
+from websocket_realtime_text_thread import WebSocketRealtimeTextThread
+from utils import ScreenshotManager
 # Configurazione logging
 logging.basicConfig(level=logging.INFO, 
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -483,6 +483,14 @@ class SessionManager:
         }
         return conversation_data
 
+    def get_status(self):
+        """Restituisce lo stato corrente della sessione."""
+        return {
+            "is_active": True,
+            "is_recording": self.recording,
+            "has_text_thread": self.text_thread is not None
+        }
+
 # Endpoint per creare una nuova sessione
 @app.route('/api/sessions', methods=['POST'])
 def create_session():
@@ -504,8 +512,8 @@ def create_session():
         }), 500
 
 # Endpoint per avviare una sessione
-@app.route('/api/sessions/<session_id>/start', methods=['POST', 'OPTIONS'])
-def start_session(session_id):
+@app.route('/api/sessions/start', methods=['POST', 'OPTIONS'])
+def start_session():
     """Avvia una sessione esistente."""
     # Gestione esplicita delle richieste OPTIONS per CORS
     if request.method == 'OPTIONS':
@@ -514,6 +522,16 @@ def start_session(session_id):
         response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
         return response
+    
+    # Ottieni l'ID della sessione dal parametro di query
+    session_id = request.args.get('sessionId')
+    
+    if not session_id:
+        logger.warning("Tentativo di avviare sessione senza ID sessione")
+        return jsonify({
+            "success": False,
+            "error": "Session ID is required."
+        }), 400
         
     if session_id not in active_sessions:
         logger.warning(f"Tentativo di avviare sessione non esistente: {session_id}")
@@ -528,21 +546,19 @@ def start_session(session_id):
         
         return jsonify({
             "success": True,
-            "message": "Session started successfully." if success else "Session already active."
+            "message": "Session started successfully."
         })
     except Exception as e:
         logger.error(f"Error starting session {session_id}: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
         return jsonify({
             "success": False,
             "error": str(e)
         }), 500
 
 # Endpoint per terminare una sessione
-@app.route('/api/sessions/<session_id>/end', methods=['POST', 'OPTIONS'])
-def end_session(session_id):
-    """Termina una sessione esistente."""
+@app.route('/api/sessions/end', methods=['POST', 'OPTIONS'])
+def end_session():
+    """Termina una sessione."""
     # Gestione esplicita delle richieste OPTIONS per CORS
     if request.method == 'OPTIONS':
         response = app.make_default_options_response()
@@ -550,139 +566,98 @@ def end_session(session_id):
         response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
         return response
-        
-    # Logging della richiesta di terminazione
-    logger.info(f"Richiesta di terminazione per la sessione {session_id}")
+    
+    # Ottieni l'ID della sessione dal parametro di query
+    session_id = request.args.get('sessionId')
+    
+    if not session_id:
+        logger.warning("Tentativo di terminare sessione senza ID sessione")
+        return jsonify({
+            "success": False,
+            "error": "Session ID is required."
+        }), 400
     
     if session_id not in active_sessions:
-        logger.warning(f"Sessione {session_id} non trovata nel dizionario active_sessions per la terminazione")
+        logger.warning(f"Tentativo di terminare sessione non esistente: {session_id}")
         return jsonify({
             "success": False,
             "error": "Session not found."
         }), 404
     
     try:
-        logger.info(f"Terminazione sessione {session_id} - Inizio")
         session = active_sessions[session_id]
-        
-        # Prima terminiamo correttamente la registrazione e il thread
-        logger.info(f"Terminazione sessione {session_id} - Chiamata a session.end_session()")
-        success = session.end_session()
-        
-        # Aggiungiamo un piccolo ritardo per consentire alle connessioni client di chiudersi
-        time.sleep(0.5)
-        
-        # Poi, se tutto è andato bene, rimuoviamo la sessione dalle sessioni attive
-        if success:
-            logger.info(f"Sessione {session_id} terminata con successo, rimozione dalla lista")
-            # Verifichiamo ancora che la sessione esista prima di eliminarla
-            if session_id in active_sessions:
-                del active_sessions[session_id]
-                logger.info(f"Sessione {session_id} rimossa dal dizionario active_sessions")
-            else:
-                logger.warning(f"Sessione {session_id} non trovata nel dizionario dopo il successo dell'end_session")
-        else:
-            logger.error(f"Impossibile terminare correttamente la sessione {session_id}")
+        session.end_session()
+        # Rimuoviamo la sessione dalla memoria
+        del active_sessions[session_id]
+        logger.info(f"Sessione {session_id} terminata con successo")
         
         return jsonify({
-            "success": success,
-            "message": "Session ended successfully." if success else "Failed to end session."
+            "success": True,
+            "message": "Session ended successfully."
         })
     except Exception as e:
         logger.error(f"Error ending session {session_id}: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
         return jsonify({
             "success": False,
             "error": str(e)
         }), 500
 
 # Endpoint per ottenere gli aggiornamenti di una sessione
-@app.route('/api/sessions/<session_id>/updates', methods=['GET'])
-def get_session_updates(session_id):
-    """Ottiene gli aggiornamenti di una sessione."""
+@app.route('/api/sessions/stream', methods=['GET'])
+def stream_session_updates():
+    """Stream degli aggiornamenti della sessione in tempo reale."""
+    # Ottieni l'ID della sessione dal parametro di query
+    session_id = request.args.get('sessionId')
+    
+    if not session_id:
+        logger.warning("Tentativo di ottenere stream senza ID sessione")
+        return jsonify({
+            "success": False,
+            "error": "Session ID is required."
+        }), 400
+    
     if session_id not in active_sessions:
+        logger.warning(f"Tentativo di ottenere stream per sessione non esistente: {session_id}")
         return jsonify({
             "success": False,
             "error": "Session not found."
         }), 404
     
     try:
-        session = active_sessions[session_id]
-        update_type = request.args.get('type', None)
-        updates = session.get_updates(update_type)
-        
-        return jsonify({
-            "success": True,
-            "updates": updates
-        })
+        # Usa generator function per SSE
+        return Response(
+            session_sse_generator(session_id),
+            mimetype='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+                'X-Accel-Buffering': 'no',  # Per Nginx
+                'Access-Control-Allow-Origin': '*'
+            }
+        )
     except Exception as e:
-        logger.error(f"Error getting updates for session {session_id}: {str(e)}")
+        logger.error(f"Error setting up SSE for session {session_id}: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
         }), 500
 
-# Endpoint per ottenere gli aggiornamenti in streaming usando SSE
-@app.route('/api/sessions/<session_id>/stream', methods=['GET'])
-def stream_session_updates(session_id):
-    """Ottiene gli aggiornamenti di una sessione in streaming."""
-    if session_id not in active_sessions:
-        logger.warning(f"Tentativo di streaming per sessione non esistente: {session_id}")
+# Endpoint per inviare un messaggio di testo
+@app.route('/api/sessions/text', methods=['POST'])
+def send_text_message():
+    """Invia un messaggio di testo."""
+    # Ottieni l'ID della sessione dal parametro di query
+    session_id = request.args.get('sessionId')
+    
+    if not session_id:
+        logger.warning("Tentativo di inviare messaggio senza ID sessione")
         return jsonify({
             "success": False,
-            "error": "Session not found."
-        }), 404
+            "error": "Session ID is required."
+        }), 400
     
-    def generate():
-        try:
-            session = active_sessions[session_id]
-            logger.info(f"Avvio streaming SSE per sessione {session_id}")
-            
-            while True:
-                # Verifichiamo che la sessione esista ancora e sia attiva
-                if session_id not in active_sessions:
-                    logger.info(f"Sessione {session_id} non più esistente, terminazione stream SSE")
-                    break
-                    
-                session = active_sessions[session_id]
-                if not session.recording:
-                    logger.info(f"Sessione {session_id} non più in registrazione, terminazione stream SSE")
-                    break
-                
-                # Controlla se ci sono aggiornamenti ogni 100ms
-                all_updates = session.get_updates()
-                
-                if all_updates['transcription']:
-                    for update in all_updates['transcription']:
-                        yield f"event: transcription\ndata: {json.dumps(update)}\n\n"
-                
-                if all_updates['response']:
-                    for update in all_updates['response']:
-                        yield f"event: response\ndata: {json.dumps(update)}\n\n"
-                
-                if all_updates['error']:
-                    for update in all_updates['error']:
-                        yield f"event: error\ndata: {json.dumps(update)}\n\n"
-                
-                time.sleep(0.1)
-                
-            logger.info(f"Stream SSE terminato per sessione {session_id}")
-            
-        except Exception as e:
-            logger.error(f"Errore durante lo streaming SSE per sessione {session_id}: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            yield f"event: error\ndata: {json.dumps({'timestamp': datetime.now().isoformat(), 'message': 'Server stream error'})}\n\n"
-    
-    return Response(stream_with_context(generate()), 
-                    content_type='text/event-stream')
-
-# Endpoint per inviare un messaggio di testo
-@app.route('/api/sessions/<session_id>/text', methods=['POST'])
-def send_text_message(session_id):
-    """Invia un messaggio di testo."""
     if session_id not in active_sessions:
+        logger.warning(f"Tentativo di inviare messaggio a sessione non esistente: {session_id}")
         return jsonify({
             "success": False,
             "error": "Session not found."
@@ -693,13 +668,23 @@ def send_text_message(session_id):
         data = request.get_json()
         
         if not data or 'text' not in data:
+            logger.warning(f"Messaggio di testo mancante per la sessione {session_id}")
             return jsonify({
                 "success": False,
                 "error": "Text message is required."
             }), 400
         
+        logger.info(f"Invio messaggio di testo alla sessione {session_id}: '{data['text']}'")
         success, error = session.send_text_message(data['text'])
         
+        if not success:
+            logger.error(f"Errore nell'invio del messaggio per la sessione {session_id}: {error}")
+            return jsonify({
+                "success": False,
+                "error": error
+            }), 500
+        
+        logger.info(f"Messaggio inviato con successo alla sessione {session_id}")
         return jsonify({
             "success": success,
             "message": "Message sent successfully." if success else error
@@ -711,117 +696,30 @@ def send_text_message(session_id):
             "error": str(e)
         }), 500
 
-# Endpoint per acquisire e analizzare uno screenshot
-@app.route('/api/sessions/<session_id>/screenshot', methods=['POST'])
-def take_screenshot(session_id):
-    """Acquisisce e analizza uno screenshot."""
-    if session_id not in active_sessions:
-        return jsonify({
-            "success": False,
-            "error": "Session not found."
-        }), 404
-    
-    try:
-        session = active_sessions[session_id]
-        data = request.get_json() or {}
-        monitor_index = data.get('monitor_index', None)
-        
-        success, result = session.take_and_analyze_screenshot(monitor_index)
-        
-        return jsonify({
-            "success": success,
-            "message": "Screenshot analysis initiated." if success else result
-        })
-    except Exception as e:
-        logger.error(f"Error taking screenshot for session {session_id}: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-# Endpoint per avviare il processo di pensiero
-@app.route('/api/sessions/<session_id>/think', methods=['POST'])
-def start_think_process(session_id):
-    """Avvia il processo di pensiero avanzato."""
-    if session_id not in active_sessions:
-        return jsonify({
-            "success": False,
-            "error": "Session not found."
-        }), 404
-    
-    try:
-        session = active_sessions[session_id]
-        success, error = session.start_think_process()
-        
-        return jsonify({
-            "success": success,
-            "message": "Think process initiated." if success else error
-        })
-    except Exception as e:
-        logger.error(f"Error starting think process for session {session_id}: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-# Endpoint per salvare la conversazione
-@app.route('/api/sessions/<session_id>/save', methods=['GET'])
-def save_conversation(session_id):
-    """Salva la conversazione."""
-    if session_id not in active_sessions:
-        return jsonify({
-            "success": False,
-            "error": "Session not found."
-        }), 404
-    
-    try:
-        session = active_sessions[session_id]
-        conversation_data = session.save_conversation()
-        
-        return jsonify({
-            "success": True,
-            "conversation": conversation_data
-        })
-    except Exception as e:
-        logger.error(f"Error saving conversation for session {session_id}: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-# Endpoint per ottenere i monitor disponibili
-@app.route('/api/monitors', methods=['GET'])
-def get_monitors():
-    """Ottiene l'elenco dei monitor disponibili."""
-    try:
-        # Crea un'istanza temporanea di ScreenshotManager
-        screenshot_manager = ScreenshotManager()
-        monitors = screenshot_manager.get_monitors()
-        
-        return jsonify({
-            "success": True,
-            "monitors": monitors
-        })
-    except Exception as e:
-        logger.error(f"Error getting monitors: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
 # Endpoint per verificare lo stato di una sessione
-@app.route('/api/sessions/<session_id>/status', methods=['GET', 'OPTIONS'])
-def get_session_status(session_id):
+@app.route('/api/sessions/status', methods=['GET', 'OPTIONS'])
+def get_session_status():
     """Verifica lo stato di una sessione."""
     # Gestione esplicita delle richieste OPTIONS per CORS
     if request.method == 'OPTIONS':
         response = app.make_default_options_response()
         response.headers['Access-Control-Allow-Origin'] = '*'
         response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
         return response
-        
+    
+    # Ottieni l'ID della sessione dal parametro di query
+    session_id = request.args.get('sessionId')
+    
+    if not session_id:
+        logger.warning("Tentativo di verificare stato sessione senza ID sessione")
+        return jsonify({
+            "success": False,
+            "error": "Session ID is required."
+        }), 400
+    
     if session_id not in active_sessions:
+        logger.warning(f"Tentativo di verificare stato sessione non esistente: {session_id}")
         return jsonify({
             "success": False,
             "error": "Session not found."
@@ -829,19 +727,14 @@ def get_session_status(session_id):
     
     try:
         session = active_sessions[session_id]
-        is_recording = session.recording
-        has_text_thread = session.text_thread is not None
+        status = session.get_status()
         
         return jsonify({
             "success": True,
-            "status": {
-                "is_active": True,
-                "is_recording": is_recording,
-                "has_text_thread": has_text_thread
-            }
+            "status": status
         })
     except Exception as e:
-        logger.error(f"Error getting status for session {session_id}: {str(e)}")
+        logger.error(f"Error getting session status for {session_id}: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -963,6 +856,46 @@ def cleanup_inactive_sessions():
 # Avvia il task di pulizia in un thread separato
 cleanup_thread = threading.Thread(target=cleanup_inactive_sessions, daemon=True)
 cleanup_thread.start()
+
+def session_sse_generator(session_id):
+    """Generator per lo streaming SSE di una sessione."""
+    try:
+        session = active_sessions[session_id]
+        logger.info(f"Avvio streaming SSE per sessione {session_id}")
+        
+        while True:
+            # Verifichiamo che la sessione esista ancora e sia attiva
+            if session_id not in active_sessions:
+                logger.info(f"Sessione {session_id} non più esistente, terminazione stream SSE")
+                break
+                
+            session = active_sessions[session_id]
+            if not session.recording:
+                logger.info(f"Sessione {session_id} non più in registrazione, terminazione stream SSE")
+                break
+            
+            # Controlla se ci sono aggiornamenti ogni 100ms
+            all_updates = session.get_updates()
+            
+            if all_updates['transcription']:
+                for update in all_updates['transcription']:
+                    yield f"event: transcription\ndata: {json.dumps(update)}\n\n"
+            
+            if all_updates['response']:
+                for update in all_updates['response']:
+                    yield f"event: response\ndata: {json.dumps(update)}\n\n"
+            
+            if all_updates['error']:
+                for update in all_updates['error']:
+                    yield f"event: error\ndata: {json.dumps(update)}\n\n"
+            
+            time.sleep(0.1)
+            
+        logger.info(f"Stream SSE terminato per sessione {session_id}")
+        
+    except Exception as e:
+        logger.error(f"Errore durante lo streaming SSE per sessione {session_id}: {str(e)}")
+        yield f"event: error\ndata: {json.dumps({'timestamp': datetime.now().isoformat(), 'message': 'Server stream error'})}\n\n"
 
 if __name__ == '__main__':
     socketio.run(app, debug=True, host='0.0.0.0', port=8000)

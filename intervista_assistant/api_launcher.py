@@ -4,7 +4,7 @@ Launcher for the Intervista Assistant API Server.
 """
 
 import os
-from .api import app
+from api import app
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 def main():

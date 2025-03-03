@@ -6,7 +6,7 @@ import queue
 import logging
 import threading
 import numpy as np
-from .web_realtime_text_thread import WebRealtimeTextThread
+from web_realtime_text_thread import WebRealtimeTextThread
 
 logger = logging.getLogger(__name__)
 
