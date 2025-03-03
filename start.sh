@@ -1,15 +1,17 @@
 #!/bin/bash
 
-# Verifica se ci sono processi Node.js in esecuzione sulla porta 3000
+# Uccidi eventuali processi precedenti sulle porte richieste
+echo "Controllo e pulizia di processi esistenti..."
 if lsof -i:3000 -t &> /dev/null; then
-  echo "La porta 3000 è già in uso. Chiudi il processo prima di avviare l'applicazione."
-  exit 1
+  echo "Terminazione dei processi sulla porta 3000..."
+  kill $(lsof -i:3000 -t) 2>/dev/null || true
+  sleep 1
 fi
 
-# Verifica se ci sono processi Python in esecuzione sulla porta 8000
 if lsof -i:8000 -t &> /dev/null; then
-  echo "La porta 8000 è già in uso. Chiudi il processo prima di avviare l'applicazione."
-  exit 1
+  echo "Terminazione dei processi sulla porta 8000..."
+  kill $(lsof -i:8000 -t) 2>/dev/null || true
+  sleep 1
 fi
 
 # Determina il percorso della directory corrente (dove si trova lo script)
@@ -29,14 +31,15 @@ if [ ! -d "$FRONTEND_DIR" ]; then
 fi
 
 # Avvia il backend
-echo "Avvio del backend API (FastAPI)..."
+echo "Avvio del backend API..."
 cd "$BACKEND_DIR" 
 # Imposto PYTHONPATH per includere la directory corrente
-PYTHONPATH="$BACKEND_DIR:$PYTHONPATH" python api_launcher.py &
+export PYTHONPATH="$SCRIPT_DIR:$BACKEND_DIR:$PYTHONPATH"
+python api_launcher.py &
 BACKEND_PID=$!
 echo "Backend avviato con PID: $BACKEND_PID"
 
-# Attendi che il backend sia pronto (5 secondi)
+# Attendi che il backend sia pronto
 echo "Attendi che il backend sia pronto..."
 sleep 5
 
@@ -47,8 +50,19 @@ npm run dev &
 FRONTEND_PID=$!
 echo "Frontend avviato con PID: $FRONTEND_PID"
 
-# Gestione chiusura con Ctrl+C
-trap "echo 'Chiusura dei processi...'; kill $BACKEND_PID; kill $FRONTEND_PID; exit 0" INT
+# Funzione per terminare tutti i processi
+cleanup() {
+  echo 'Chiusura dei processi...'
+  # Termina tutti i processi figlio
+  pkill -P $$ || true
+  # Termina esplicitamente i processi noti
+  kill $BACKEND_PID 2>/dev/null || true
+  kill $FRONTEND_PID 2>/dev/null || true
+  exit 0
+}
+
+# Gestione chiusura con Ctrl+C e altri segnali
+trap cleanup INT TERM
 
 # Mantieni lo script in esecuzione
 echo "L'applicazione è in esecuzione. Premi Ctrl+C per terminare."

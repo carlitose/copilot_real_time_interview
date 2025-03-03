@@ -523,6 +523,10 @@ class SessionManager:
 def require_session(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # Skip session check for OPTIONS requests
+        if request.method == 'OPTIONS':
+            return jsonify({"success": True}), 200
+            
         session_id = request.json.get('session_id')
         if not session_id or session_id not in active_sessions:
             return jsonify({"success": False, "error": "Session not found"}), 404
@@ -532,6 +536,15 @@ def require_session(f):
 #
 # API Endpoints
 #
+
+@app.route('/api/<path:path>', methods=['OPTIONS'])
+def handle_options(path):
+    """Handle OPTIONS requests for all API endpoints."""
+    response = jsonify({"success": True})
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+    return response, 200
 
 @app.route('/api/sessions', methods=['POST', 'OPTIONS'])
 def create_session():
