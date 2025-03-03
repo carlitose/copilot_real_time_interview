@@ -194,3 +194,5 @@ out/
 *.tsbuildinfo
 
 .DS_Store
+
+saved_conversations/

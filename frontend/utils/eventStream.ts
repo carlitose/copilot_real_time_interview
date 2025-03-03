@@ -1,9 +1,7 @@
-
-// Start of Selection
 /**
  * Modulo per la gestione degli stream di eventi dal server (SSE)
  */
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 
 // URL di base per l'API
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/api';
@@ -54,37 +52,48 @@ export interface StreamControl {
 }
 
 /**
- * Hook per gestire lo stream di eventi dal server
- * @param sessionId ID della sessione
- * @param callbacks Callback per vari tipi di eventi
- * @returns Controlli per lo stream di eventi
+ * Classe che gestisce la connessione EventSource
  */
-export function useSessionStream(sessionId: string, callbacks: StreamCallbacks): StreamControl {
-  // Effetto per gestire la connessione
-  useEffect(() => {
-    if (!sessionId) return;
+class EventStreamManager {
+  private eventSource: EventSource | null = null;
+  private sessionId: string;
+  private callbacks: StreamCallbacks;
 
-    // Crea un EventSource per gli eventi SSE
-    const eventSource = new EventSource(`${API_BASE_URL}/sessions/stream?session_id=${sessionId}`);
+  constructor(sessionId: string, callbacks: StreamCallbacks) {
+    this.sessionId = sessionId;
+    this.callbacks = callbacks;
+  }
+
+  /**
+   * Inizia a gestire gli eventi
+   */
+  connect(): void {
+    if (!this.sessionId) return;
+    
+    // Chiudi eventuali fonti di eventi esistenti
+    this.disconnect();
+
+    // Crea un nuovo EventSource per gli eventi SSE
+    this.eventSource = new EventSource(`${API_BASE_URL}/sessions/stream?session_id=${this.sessionId}`);
     
     // Gestore generico per i messaggi
-    eventSource.onmessage = (event) => {
+    this.eventSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data) as Update;
         
         // Distribuisci i messaggi in base al tipo
         switch (data.type) {
           case 'transcription':
-            callbacks.onTranscription?.(data);
+            this.callbacks.onTranscription?.(data);
             break;
           case 'response':
-            callbacks.onResponse?.(data);
+            this.callbacks.onResponse?.(data);
             break;
           case 'error':
-            callbacks.onError?.(data);
+            this.callbacks.onError?.(data);
             break;
           case 'connection':
-            callbacks.onConnectionStatus?.(data.connected);
+            this.callbacks.onConnectionStatus?.(data.connected);
             break;
         }
       } catch (error) {
@@ -93,31 +102,57 @@ export function useSessionStream(sessionId: string, callbacks: StreamCallbacks):
     };
     
     // Gestione degli errori
-    if (callbacks.onConnectionError) {
-      eventSource.onerror = callbacks.onConnectionError;
+    if (this.callbacks.onConnectionError) {
+      this.eventSource.onerror = this.callbacks.onConnectionError;
     }
+  }
+
+  /**
+   * Chiude la connessione EventSource
+   */
+  disconnect(): void {
+    if (this.eventSource) {
+      this.eventSource.close();
+      this.eventSource = null;
+    }
+  }
+}
+
+/**
+ * Hook per gestire lo stream di eventi dal server
+ * @param sessionId ID della sessione
+ * @param callbacks Callback per vari tipi di eventi
+ * @returns Controlli per lo stream di eventi
+ */
+export function useSessionStream(sessionId: string, callbacks: StreamCallbacks): StreamControl {
+  // Utilizza useRef per mantenere un riferimento alla classe EventStreamManager
+  const managerRef = useRef<EventStreamManager | null>(null);
+  
+  // Effetto per gestire la connessione
+  useEffect(() => {
+    if (!sessionId) return;
+    
+    // Crea un nuovo manager
+    const manager = new EventStreamManager(sessionId, callbacks);
+    managerRef.current = manager;
+    
+    // Inizia a gestire gli eventi
+    manager.connect();
     
     // Pulizia al dismount del componente
     return () => {
-      eventSource.close();
+      if (managerRef.current) {
+        managerRef.current.disconnect();
+      }
     };
   }, [sessionId, callbacks]);
 
   // Ritorna i controlli dello stream
   return {
     cleanup: () => {
-      // Ottieni e chiudi l'EventSource esistente se presente
-      const elements = document.querySelectorAll('event-source');
-      for (let i = 0; i < elements.length; i++) {
-        const element = elements[i];
-        if ((element as any).url?.includes(sessionId)) {
-          (element as any).close();
-        }
+      if (managerRef.current) {
+        managerRef.current.disconnect();
       }
-      
-      // Crea un nuovo EventSource (per assicurarsi) e chiudi immediatamente
-      const eventSource = new EventSource(`${API_BASE_URL}/sessions/stream?session_id=${sessionId}`);
-      eventSource.close();
     }
   };
 } 

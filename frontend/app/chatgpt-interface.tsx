@@ -3,7 +3,7 @@ import { Play, Square, Trash2, Save, Brain, Camera, Bug, Mic, MicOff } from "luc
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useCallback } from "react"
 import { formatMarkdown } from "@/utils/formatMessage"
 
 // Importazione delle API e dei servizi
@@ -37,6 +37,106 @@ export default function ChatGPTInterface() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+  // Ref per il listener degli stream
+  const streamControlRef = useRef<any>(null);
+
+  // Callback per gestire le risposte di trascrizione
+  const handleTranscription = useCallback((update: TranscriptionUpdate) => {
+    console.log(`Ricevuto aggiornamento trascrizione: ${update.text}`);
+    // Non facciamo nulla con la trascrizione per ora
+  }, []);
+
+  // Callback per gestire le risposte del modello
+  const handleResponse = useCallback((update: ResponseUpdate) => {
+    console.log(`Ricevuta risposta: ${update.text}`);
+    setMessages(prevMessages => {
+      // Trova l'ultimo messaggio dell'assistente
+      const lastAssistantIndex = [...prevMessages].reverse().findIndex(m => m.role === 'assistant');
+      
+      // Se c'è già un messaggio dell'assistente e non è la risposta finale,
+      // aggiorna quel messaggio invece di aggiungerne uno nuovo
+      if (lastAssistantIndex !== -1 && !update.final) {
+        const reversedIndex = lastAssistantIndex;
+        const actualIndex = prevMessages.length - 1 - reversedIndex;
+        
+        const newMessages = [...prevMessages];
+        newMessages[actualIndex] = {
+          ...newMessages[actualIndex],
+          content: update.text
+        };
+        return newMessages;
+      }
+      
+      // Se è la risposta finale o non ci sono messaggi dell'assistente, aggiungi un nuovo messaggio
+      if (update.final) {
+        return [...prevMessages, { role: 'assistant', content: update.text }];
+      }
+      
+      return prevMessages;
+    });
+  }, []);
+
+  // Callback per gestire gli errori
+  const handleError = useCallback((update: ErrorUpdate) => {
+    console.error(`Errore ricevuto dallo stream: ${update.message}`);
+    setIsStreamError(true);
+  }, []);
+
+  // Callback per gestire gli errori di connessione
+  const handleConnectionError = useCallback((error: Event) => {
+    console.error("Errore di connessione con lo stream:", error);
+    setIsStreamError(true);
+  }, []);
+
+  // Callback per gestire lo stato della connessione
+  const handleConnectionStatus = useCallback((connected: boolean) => {
+    console.log(`Stato connessione stream: ${connected ? 'connesso' : 'disconnesso'}`);
+    setIsConnected(connected);
+  }, []);
+
+  // Effetto per configurare gli stream quando la sessione è attiva
+  useEffect(() => {
+    if (isSessionActive && sessionId) {
+      console.log(`Configurazione degli stream per la sessione ${sessionId}...`);
+      
+      // Non chiamare gli hook dentro useEffect
+      // const streamControl = useSessionStream(sessionId, {
+      //   onTranscription: handleTranscription,
+      //   onResponse: handleResponse,
+      //   onError: handleError,
+      //   onConnectionError: handleConnectionError,
+      //   onConnectionStatus: handleConnectionStatus
+      // });
+      
+      // Utilizziamo lo streamControl che è già stato creato nel corpo del componente
+      setCleanupStream(() => streamControlRef.current?.cleanup);
+      
+      return () => {
+        if (streamControlRef.current) {
+          streamControlRef.current.cleanup();
+          streamControlRef.current = null;
+        }
+      };
+    }
+  }, [isSessionActive, sessionId, handleTranscription, handleResponse, handleError, handleConnectionError, handleConnectionStatus]);
+
+  // Chiamiamo useSessionStream nel corpo del componente
+  const streamControl = useSessionStream(
+    sessionId || '', 
+    {
+      onTranscription: handleTranscription,
+      onResponse: handleResponse,
+      onError: handleError, 
+      onConnectionError: handleConnectionError,
+      onConnectionStatus: handleConnectionStatus
+    }
+  );
+  
+  // Aggiorniamo il ref all'effetto
+  useEffect(() => {
+    streamControlRef.current = streamControl;
+  }, [streamControl]);
+
   // Inizializzazione automatica della sessione all'avvio
   useEffect(() => {
     async function initializeSession() {
@@ -51,9 +151,7 @@ export default function ChatGPTInterface() {
         if (success) {
           console.log(`Sessione ${newSessionId} avviata automaticamente`);
           setIsSessionActive(true);
-          
-          // Configura gli stream di eventi
-          setupStreams(newSessionId);
+          // Non chiamare più setupStreams qui
         } else {
           console.error(`Errore nell'avvio automatico della sessione ${newSessionId}`);
         }
@@ -71,83 +169,6 @@ export default function ChatGPTInterface() {
       messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }, [messages]);
-
-  const setupStreams = (sid: string) => {
-    if (!sid) return;
-    
-    console.log(`Configurazione degli stream per la sessione ${sid}...`);
-    
-    // Callback per aggiornare la trascrizione
-    const onTranscription = (update: TranscriptionUpdate) => {
-      console.log(`Ricevuto aggiornamento trascrizione: ${update.text}`);
-      // Non facciamo nulla con la trascrizione per ora
-    };
-    
-    // Callback per gestire le risposte
-    const onResponse = (update: ResponseUpdate) => {
-      console.log(`Ricevuta risposta: ${update.text}`);
-      setMessages(prevMessages => {
-        // Trova l'ultimo messaggio dell'assistente
-        const lastAssistantIndex = [...prevMessages].reverse().findIndex(m => m.role === 'assistant');
-        
-        // Se c'è già un messaggio dell'assistente e non è la risposta finale,
-        // aggiorna quel messaggio invece di aggiungerne uno nuovo
-        if (lastAssistantIndex !== -1 && !update.final) {
-          const reversedIndex = lastAssistantIndex;
-          const actualIndex = prevMessages.length - 1 - reversedIndex;
-          
-          const newMessages = [...prevMessages];
-          newMessages[actualIndex] = {
-            ...newMessages[actualIndex],
-            content: update.text
-          };
-          
-          return newMessages;
-        } else if (update.final) {
-          // Se è la risposta finale, aggiungi un nuovo messaggio
-          return [...prevMessages, { role: 'assistant', content: update.text }];
-        } else {
-          // Se non c'è un messaggio dell'assistente, aggiungine uno nuovo
-          return [...prevMessages, { role: 'assistant', content: update.text }];
-        }
-      });
-    };
-    
-    // Callback per gestire gli errori
-    const onError = (update: ErrorUpdate) => {
-      console.error(`Errore ricevuto dal server: ${update.message}`);
-      setIsStreamError(true);
-      setMessages(prevMessages => [...prevMessages, { role: 'assistant', content: `Errore: ${update.message}` }]);
-    };
-    
-    // Callback per gestire gli errori di connessione
-    const onConnectionError = (error: Event) => {
-      console.error('Errore di connessione SSE:', error);
-      setIsConnected(false);
-      setIsStreamError(true);
-    };
-    
-    // Callback per lo stato della connessione
-    const onConnectionStatus = (connected: boolean) => {
-      console.log(`Stato connessione cambiato: ${connected ? 'connesso' : 'disconnesso'}`);
-      setIsConnected(connected);
-    };
-    
-    // Configurazione dello stream
-    const streamHandler = useSessionStream(sid, {
-      onTranscription,
-      onResponse,
-      onError,
-      onConnectionError,
-      onConnectionStatus
-    });
-    
-    // Salva la funzione di pulizia
-    setCleanupStream(() => streamHandler.cleanup);
-    
-    // Avvia la connessione
-    setIsConnected(true);
-  };
 
   // Gestione dell'avvio e interruzione della sessione
   const toggleSession = async () => {
@@ -201,9 +222,7 @@ export default function ChatGPTInterface() {
         if (success) {
           console.log(`Sessione ${sid} avviata con successo`);
           setIsSessionActive(true);
-          
-          // Configura gli stream
-          setupStreams(sid);
+          // Non chiamare più setupStreams qui
         } else {
           console.error(`Errore nell'avvio della sessione ${sid}`);
         }
