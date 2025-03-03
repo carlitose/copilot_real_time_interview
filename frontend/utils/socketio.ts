@@ -26,6 +26,9 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
   const [isActive, setIsActive] = useState(false);
   const sessionIdRef = useRef<string>(sessionId);
   
+  // Aggiungiamo un ref per tracciare lo stato attivo indipendentemente dallo stato React
+  const isActiveRef = useRef<boolean>(false);
+  
   // Update the sessionId reference when it changes
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -44,6 +47,7 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
       socketRef.current.on('disconnect', () => {
         console.log('[SOCKET.IO] Disconnected');
         setIsActive(false);
+        isActiveRef.current = false; // Aggiorniamo anche il ref
       });
 
       socketRef.current.on('error', (error: any) => {
@@ -90,7 +94,9 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
       console.log(`[SOCKET.IO] Connection status: ${socketRef.current.connected ? 'Connected' : 'Disconnected'}`);
       
       // Impostiamo subito isActive a true all'inizio, prima di qualsiasi altra operazione
+      // Aggiorniamo sia lo stato React che il ref
       setIsActive(true);
+      isActiveRef.current = true;
       console.log(`[AUDIO] isActive flag impostato a true prima di iniziare la registrazione`);
       
       // TEST MODE: Send test data every second to verify the connection
@@ -101,7 +107,8 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
         
         // Send test data every second
         const testInterval = setInterval(() => {
-          if (!socketRef.current || !socketRef.current.connected || !isActive) {
+          // Usiamo il ref invece dello stato
+          if (!socketRef.current || !socketRef.current.connected || !isActiveRef.current) {
             console.log('[AUDIO TEST] Stopping test interval');
             clearInterval(testInterval);
             console.log('[AUDIO TEST] Test interval cleared');
@@ -202,8 +209,9 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
           lastProcessTimestampRef.current = now;
         }
         
-        if (!socketRef.current || !isActive) {
-          console.log(`Audio processor active but conditions not met: socketRef.current=${!!socketRef.current}, isActive=${isActive}`);
+        // Usiamo il ref invece dello stato
+        if (!socketRef.current || !isActiveRef.current) {
+          console.log(`Audio processor active but conditions not met: socketRef.current=${!!socketRef.current}, isActiveRef.current=${isActiveRef.current}`);
           return;
         }
         
@@ -257,9 +265,16 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
           }
           
           // Direct sending and verification
+          console.log(`[AUDIO DEBUG] Invio audio data al server con evento 'audio_data', sessionId=${sessionIdRef.current}`);
+          // Stampa i primi 10 valori per debug
+          console.log(`[AUDIO DEBUG] Primi 10 valori: [${audioData.slice(0, 10).join(', ')}]`);
+          
           socketRef.current.emit('audio_data', sessionIdRef.current, audioData, (acknowledgement: any) => {
             if (acknowledgement && acknowledgement.received) {
               console.log(`[AUDIO SUCCESS] Server confirmed receipt of ${audioData.length} samples`);
+              if (acknowledgement.samples) {
+                console.log(`[AUDIO SUCCESS] Server processed ${acknowledgement.samples} samples`);
+              }
             } else if (acknowledgement && acknowledgement.error) {
               console.error(`[AUDIO ERROR] Server reported error: ${acknowledgement.error}`);
             } else {
@@ -311,7 +326,9 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
         console.log('[AUDIO TEST] Test interval cleared');
       }
       
+      // Aggiorniamo sia lo stato React che il ref
       setIsActive(false);
+      isActiveRef.current = false;
       console.log('Audio recording stopped');
     },
     isActive

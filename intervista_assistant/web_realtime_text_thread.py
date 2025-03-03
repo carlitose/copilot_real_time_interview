@@ -627,7 +627,8 @@ class WebRealtimeTextThread:
             bool: True se l'aggiunta è riuscita, False altrimenti
         """
         audio_size = len(audio_data) if isinstance(audio_data, bytes) else 'non-binary'
-        logger.info(f"[AUDIO] Ricevuti dati audio esterni: {audio_size} bytes")
+        # Manteniamo un log essenziale senza dettagli specifici
+        logger.info(f"[AUDIO] Ricevuti dati audio esterni: dimensione={audio_size}")
         
         with self.lock:
             if not self.connected or not self.websocket:
@@ -640,9 +641,8 @@ class WebRealtimeTextThread:
             # Se i dati audio sono sufficienti, inviali direttamente
             if len(audio_data) >= 3200:  # Minimo di audio necessario
                 # Invia audio come messaggio base64
-                logger.info(f"[AUDIO] Codifica audio in base64: {len(audio_data)} bytes")
+                # Rimuoviamo log verbosi sulla codifica
                 base64_audio = base64.b64encode(audio_data).decode('ascii')
-                logger.info(f"[AUDIO] Audio codificato: {len(base64_audio)} caratteri")
                 
                 audio_message = {
                     "type": "conversation.item.create",
@@ -654,7 +654,7 @@ class WebRealtimeTextThread:
                 }
                 logger.info("[AUDIO] Invio messaggio audio a OpenAI...")
                 ws.send(json.dumps(audio_message))
-                logger.info(f"[AUDIO] Messaggio audio inviato con successo: {len(audio_data)} bytes")
+                logger.info("[AUDIO] Messaggio audio inviato con successo")
                 
                 # Invia commit per elaborare l'audio
                 commit_message = {"type": "input_audio_buffer.commit"}

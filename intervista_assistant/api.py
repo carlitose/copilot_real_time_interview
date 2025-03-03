@@ -808,12 +808,12 @@ def handle_audio_data(session_id, audio_data):
     acknowledgement = {'received': False, 'error': None}
     
     try:
-        # Log additional details about the audio data
+        # Log only essential metadata about the audio data
         audio_type = type(audio_data).__name__
         if isinstance(audio_data, list):
             audio_length = len(audio_data)
-            sample_values = str(audio_data[:5]) + "..." if audio_length > 5 else str(audio_data)
-            logger.info(f"[SOCKET.IO:AUDIO] Received audio data for session {session_id}: {audio_length} samples, type={audio_type}, first samples={sample_values}")
+            # Rimuoviamo il logging dei sample values che crea log enormi
+            logger.info(f"[SOCKET.IO:AUDIO] Received audio data for session {session_id}: {audio_length} samples, type={audio_type}")
             acknowledgement['samples'] = audio_length
         elif isinstance(audio_data, bytes):
             logger.info(f"[SOCKET.IO:AUDIO] Received audio data for session {session_id}: {len(audio_data)} bytes, type={audio_type}")
@@ -838,7 +838,7 @@ def handle_audio_data(session_id, audio_data):
             return acknowledgement
         
         # Process the audio data and send it to the WebRealtimeTextThread
-        logger.info(f"[SOCKET.IO:AUDIO] Processing audio data for session {session_id}")
+        # Rimuoviamo questo log per ridurre la verbosità
         
         # Check if audio_data is not empty
         if not audio_data:
@@ -850,16 +850,12 @@ def handle_audio_data(session_id, audio_data):
             # Convert to numpy array if it's a list
             if isinstance(audio_data, list):
                 audio_data = np.array(audio_data, dtype=np.int16)
-                logger.info(f"[SOCKET.IO:AUDIO] Converted list to numpy array: shape={audio_data.shape}, dtype={audio_data.dtype}")
+                # Riduciamo i dettagli nel log
+                logger.info(f"[SOCKET.IO:AUDIO] Converted list to numpy array for session {session_id}")
             
             # Process the audio data with the text thread
             if session.text_thread:
-                session.text_thread.process_audio(audio_data)
-                logger.info(f"[SOCKET.IO:AUDIO] Audio data sent to text thread for processing")
-            else:
-                logger.error(f"[SOCKET.IO:AUDIO] Text thread not available for session {session_id}")
-                acknowledgement['error'] = 'Text thread not available'
-                return acknowledgement
+                session.text_thread.add_audio_data(audio_data)
         except Exception as e:
             logger.error(f"[SOCKET.IO:AUDIO] Error processing audio in text thread: {str(e)}")
             acknowledgement['error'] = f'Error in text thread: {str(e)}'

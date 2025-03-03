@@ -54,9 +54,10 @@ def main():
     # Configure logging for flask
     if debug:
         logging.getLogger('werkzeug').setLevel(logging.INFO)
-        # Enable Flask-SocketIO logging
-        logging.getLogger('engineio').setLevel(logging.INFO)
-        logging.getLogger('socketio').setLevel(logging.INFO)
+        # Modifichiamo il livello di logging per engineio e socketio
+        # da INFO a WARNING per evitare log troppo verbosi
+        logging.getLogger('engineio').setLevel(logging.WARNING)
+        logging.getLogger('socketio').setLevel(logging.WARNING)
         
         print(f"Server running in debug mode with reloader {'enabled' if use_reloader else 'disabled'}")
         if use_reloader:
@@ -72,7 +73,7 @@ def main():
         reloader_type=reloader_type,
         extra_files=extra_files,
         allow_unsafe_werkzeug=True,
-        log_output=True  # Enable logging of all Socket.IO events
+        log_output=False  # Disabilitiamo il logging di tutti gli eventi Socket.IO
     )
 
 if __name__ == "__main__":
