@@ -7,6 +7,9 @@ import { useState, useEffect, useRef } from "react"
 import { apiClient, TranscriptionUpdate, ResponseUpdate, ErrorUpdate, AudioStreamControl, startSessionAudio, useSessionStream } from "@/utils/api"
 import { formatMarkdown } from "@/utils/formatMessage"
 
+// Costante per l'URL base delle API
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/api';
+
 // Definiamo qui l'interfaccia Message per sostituire quella che era importata
 interface Message {
   role: 'user' | 'assistant' | 'system';
@@ -23,84 +26,133 @@ export default function ChatGPTInterface() {
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [audioControl, setAudioControl] = useState<AudioStreamControl | null>(null)
   const [isStreamError, setIsStreamError] = useState<boolean>(false)
+  const [sessionStatus, setSessionStatus] = useState<any>(null)
+
+  // Stato per tenere traccia della funzione di pulizia SSE
+  const [cleanupStream, setCleanupStream] = useState<(() => void) | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // Utilizziamo il custom hook per lo streaming degli aggiornamenti della sessione
-  const { cleanup: cleanupStream } = useSessionStream(
-    sessionId,
-    {
-      onTranscription: (update: TranscriptionUpdate) => {
-        console.log('Trascrizione ricevuta:', update);
+  // Inizializzazione automatica della sessione all'avvio
+  useEffect(() => {
+    async function initializeSession() {
+      try {
+        console.log("Inizializzazione automatica di una nuova sessione...");
+        const newSessionId = await apiClient.createSession();
+        console.log(`Nuova sessione creata: ${newSessionId}`);
+        setSessionId(newSessionId);
         
-        // Se non è un messaggio di stato, aggiungilo come messaggio utente
-        if (!update.text.includes("Recording...") && 
-            !update.text.includes("Registrazione avviata...") && 
-            !update.text.startsWith('\n[')) {
+        // Avvio immediato della sessione
+        const success = await apiClient.startSession(newSessionId);
+        if (success) {
+          console.log(`Sessione ${newSessionId} avviata automaticamente`);
+          setIsSessionActive(true);
+          setIsConnected(true);
           
-          setMessages(prev => {
-            // Verifica se esiste già lo stesso messaggio per evitare duplicati
-            const exists = prev.some(m => m.role === 'user' && m.content === update.text);
-            if (exists) return prev;
-            
-            return [...prev, { role: 'user', content: update.text }];
-          });
+          // Setup degli stream per la nuova sessione
+          setupStreams(newSessionId);
+        } else {
+          console.error(`Errore nell'avvio automatico della sessione ${newSessionId}`);
         }
-      },
-      
-      onResponse: (update: ResponseUpdate) => {
-        console.log('Risposta ricevuta:', update);
-        
-        setMessages(prev => {
-          // Se l'ultimo messaggio è un messaggio di attesa dell'assistente, lo sostituiamo
-          const lastMessage = prev[prev.length - 1];
-          if (lastMessage && lastMessage.role === 'assistant' && 
-              (lastMessage.content === 'Sto elaborando la tua richiesta...' ||
-               lastMessage.content === 'Avvio processo di analisi approfondita...' ||
-               lastMessage.content === 'Messaggio inviato al server. In attesa di risposta...')) {
-            return [...prev.slice(0, -1), { role: 'assistant', content: update.text }];
-          }
-          
-          // Verifica se esiste già un messaggio assistente, aggiorna se necessario
-          const assistantIndex = prev.findIndex(m => m.role === 'assistant');
-          if (assistantIndex >= 0) {
-            // Se il contenuto è diverso, aggiungi un nuovo messaggio
-            if (prev[assistantIndex].content !== update.text) {
-              return [...prev, { role: 'assistant', content: update.text }];
-            }
-            return prev;
-          }
-          
-          // Altrimenti aggiungi un nuovo messaggio
-          return [...prev, { role: 'assistant', content: update.text }];
-        });
-      },
-      
-      onError: (update: ErrorUpdate) => {
-        console.error('Errore ricevuto:', update);
-        setMessages(prev => [
-          ...prev, 
-          { role: 'assistant', content: `Si è verificato un errore: ${update.message}` }
-        ]);
-      },
-      
-      onConnectionError: (error: Event) => {
-        console.error('Errore di connessione SSE:', error);
-        
-        // Verifichiamo se la sessione è ancora attiva prima di mostrare errori
-        // Se la sessione è stata terminata volontariamente, ignoriamo gli errori
-        if (isSessionActive && !isStreamError) {
-          setIsStreamError(true);
-          setIsConnected(false);
-          setMessages(prev => [
-            ...prev,
-            { role: 'assistant', content: 'Si è verificato un errore di connessione con il server. Prova a chiudere e riaprire la sessione.' }
-          ]);
-        }
+      } catch (error) {
+        console.error("Errore durante l'inizializzazione della sessione:", error);
       }
     }
-  );
+    
+    // Chiama l'inizializzazione
+    initializeSession();
+    
+    // Setup del controllo periodico dello stato della sessione
+    const intervalId = setInterval(async () => {
+      if (sessionId) {
+        try {
+          const response = await fetch(`${API_BASE_URL}/sessions/status?sessionId=${sessionId}`);
+          if (response.ok) {
+            const data = await response.json();
+            console.log("Stato sessione:", data);
+            setSessionStatus(data.status);
+            
+            if (!data.success || !data.status?.is_active) {
+              console.warn("La sessione non sembra più essere attiva sul server");
+            }
+          } else {
+            console.error(`Errore nel controllo stato sessione: ${response.status} ${response.statusText}`);
+          }
+        } catch (error) {
+          console.error("Errore durante il controllo dello stato sessione:", error);
+        }
+      }
+    }, 10000); // Controlla ogni 10 secondi
+    
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, []);
+
+  // Funzione per configurare gli stream
+  const setupStreams = (sid: string) => {
+    console.log(`Configurazione degli stream per la sessione ${sid}`);
+    
+    // Callback per aggiornare la trascrizione
+    const onTranscription = (update: TranscriptionUpdate) => {
+      console.log(`Ricevuto aggiornamento trascrizione: ${update.text}`);
+      // Non facciamo nulla con la trascrizione ora
+    };
+
+    // Callback per gestire le risposte
+    const onResponse = (update: ResponseUpdate) => {
+      console.log(`Ricevuta risposta: ${update.text}`);
+      setMessages(prevMessages => {
+        // Trova l'ultimo messaggio dell'assistente
+        const lastAssistantIndex = [...prevMessages].reverse().findIndex(m => m.role === 'assistant');
+        
+        // Se c'è un messaggio di "caricamento" dell'assistente, lo sostituiamo
+        if (lastAssistantIndex >= 0 && prevMessages[prevMessages.length - 1 - lastAssistantIndex].content === 'Sto elaborando la tua richiesta...') {
+          const newMessages = [...prevMessages];
+          newMessages[prevMessages.length - 1 - lastAssistantIndex] = {
+            role: 'assistant',
+            content: update.text
+          };
+          return newMessages;
+        } else {
+          // Altrimenti aggiungiamo un nuovo messaggio dell'assistente
+          return [...prevMessages, { role: 'assistant', content: update.text }];
+        }
+      });
+    };
+
+    // Callback per gestire gli errori
+    const onError = (update: ErrorUpdate) => {
+      console.error(`Errore ricevuto dal server: ${update.message}`);
+      setIsStreamError(true);
+      setMessages(prevMessages => [...prevMessages, { role: 'assistant', content: `Errore: ${update.message}` }]);
+    };
+
+    // Callback per errori di connessione
+    const onConnectionError = (error: Event) => {
+      console.error('Errore di connessione SSE:', error);
+      setIsConnected(false);
+      // Se la sessione è stata chiusa volontariamente, non mostriamo errori
+      if (isSessionActive) {
+        setMessages(prevMessages => [
+          ...prevMessages,
+          { role: 'assistant', content: 'La connessione al server è stata interrotta. Prova a riavviare la sessione.' }
+        ]);
+      }
+    };
+
+    // Configurazione dello stream
+    const { cleanup } = useSessionStream(sid, {
+      onTranscription,
+      onResponse,
+      onError,
+      onConnectionError
+    });
+
+    // Salva la funzione di cleanup
+    setCleanupStream(() => cleanup);
+  };
 
   // Scroll automatico alla fine dei messaggi
   useEffect(() => {
@@ -109,14 +161,18 @@ export default function ChatGPTInterface() {
 
   // Cleanup quando il componente viene smontato
   useEffect(() => {
+    // Ferma lo streaming quando cambiamo pagina o chiudiamo l'app
     return () => {
       if (sessionId) {
-        // Ferma lo streaming audio, se attivo
+        console.log(`Cleanup on unmount for session ${sessionId}`);
+        // Arresta l'audio se attivo
         if (audioControl) {
           audioControl.stop();
         }
         // Chiudi gli stream
-        cleanupStream();
+        if (cleanupStream) {
+          cleanupStream();
+        }
         // Termina la sessione
         apiClient.endSession(sessionId).catch(console.error);
       }
@@ -127,7 +183,9 @@ export default function ChatGPTInterface() {
   const toggleSession = async () => {
     try {
       if (isSessionActive) {
-        setIsSessionActive(false); // Impostiamo subito a false per evitare ulteriori tentativi di connessione
+        // Chiusura sessione
+        console.log("Chiusura sessione in corso...");
+        setIsSessionActive(false);
         setIsConnected(false);
         
         // Ferma lo streaming audio, se attivo
@@ -136,87 +194,59 @@ export default function ChatGPTInterface() {
           setAudioControl(null);
         }
         
-        // Prima chiudiamo i nostri stream
-        cleanupStream();
-        
-        if (sessionId) {
-          try {
-            await apiClient.endSession(sessionId);
-          } catch (error) {
-            console.error('Error ending session:', error);
-          }
-          setSessionId(null);
+        // Ferma lo streaming degli aggiornamenti
+        if (cleanupStream) {
+          cleanupStream();
+          setCleanupStream(null);
         }
         
-        setIsRecording(false);
-        // Puliamo i messaggi
-        setMessages([]);
+        // Chiudi la sessione sul server
+        if (sessionId) {
+          await apiClient.endSession(sessionId);
+          console.log("Sessione chiusa con successo");
+        }
       } else {
-        try {
-          // Reimpostiamo il flag di errore di streaming
-          setIsStreamError(false);
+        // Utilizziamo la sessione già creata all'avvio
+        if (sessionId) {
+          console.log(`Riattivazione della sessione ${sessionId}...`);
           
-          // Impostiamo un messaggio di connessione
-          setMessages([{ role: 'assistant', content: 'Connessione in corso...' }]);
-          
-          // Crea una nuova sessione con timeout
-          const sessionPromise = apiClient.createSession();
-          const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Timeout durante la creazione della sessione')), 10000)
-          );
-          
-          const newSessionId = await Promise.race([sessionPromise, timeoutPromise]) as string;
-          setSessionId(newSessionId);
-          
-          // Aggiorniamo il messaggio di stato
-          setMessages([{ role: 'assistant', content: 'Sessione creata, avvio in corso...' }]);
-          
-          // Avvia la sessione
-          await apiClient.startSession(newSessionId);
-          
-          // Avvia lo streaming audio automaticamente
+          // Proviamo a verificare lo stato attuale
           try {
-            const control = await startSessionAudio(newSessionId);
-            setAudioControl(control);
-            setIsRecording(true);
-          } catch (audioError: any) {
-            console.error("Errore nell'avvio dello streaming audio:", audioError);
-            setMessages(prev => [
-              ...prev,
-              { role: 'assistant', content: 'Non è stato possibile avviare lo streaming audio. La sessione funzionerà in modalità testo.' }
-            ]);
-          }
-          
-          setMessages([{ role: 'assistant', content: 'Sessione avviata! Ora puoi parlare o digitare.' }]);
-          setIsSessionActive(true);
-          setIsConnected(true);
-        } catch (sessionError: any) {
-          console.error("Errore nell'avvio della sessione:", sessionError);
-          
-          // Puliamo eventuali risorse
-          if (sessionId) {
-            try {
-              await apiClient.endSession(sessionId);
-            } catch (e) {
-              console.error("Errore nella pulizia della sessione:", e);
+            const response = await fetch(`${API_BASE_URL}/sessions/status?sessionId=${sessionId}`);
+            if (response.ok) {
+              const data = await response.json();
+              console.log("Status check prima di riattivare:", data);
+              
+              if (data.success && data.status?.is_active) {
+                console.log("La sessione è già attiva, configuro solo gli stream");
+                setIsSessionActive(true);
+                setIsConnected(true);
+                setupStreams(sessionId);
+                return;
+              }
             }
-            setSessionId(null);
+          } catch (error) {
+            console.error("Errore nel controllo status:", error);
           }
           
-          setMessages([{ 
-            role: 'assistant', 
-            content: `Si è verificato un errore durante l'avvio della sessione: ${sessionError.message}. Verifica che il server sia in esecuzione sulla porta 8000.` 
-          }]);
+          // Se arriviamo qui, dobbiamo riavviare la sessione
+          const success = await apiClient.startSession(sessionId);
           
-          return;
+          if (success) {
+            console.log(`Sessione ${sessionId} riavviata con successo`);
+            setIsSessionActive(true);
+            setIsConnected(true);
+            // Setup degli stream
+            setupStreams(sessionId);
+          } else {
+            console.error(`Errore nel riavvio della sessione ${sessionId}`);
+          }
+        } else {
+          console.error("Nessun ID sessione disponibile per l'avvio");
         }
       }
-    } catch (error: any) {
-      console.error("Errore nella gestione della sessione:", error);
-      setMessages(prev => [
-        ...prev,
-        { role: 'assistant', content: `Si è verificato un errore durante la gestione della sessione: ${error.message}` }
-      ]);
+    } catch (error) {
+      console.error("Errore durante la gestione della sessione:", error);
     }
   };
 
@@ -224,12 +254,22 @@ export default function ChatGPTInterface() {
   const handleSendMessage = async () => {
     if (!inputMessage.trim() || !sessionId) return;
     
-    // Aggiungi il messaggio dell'utente
-    const userMessage: Message = { role: 'user', content: inputMessage };
-    setMessages(prev => [...prev, userMessage]);
-    setInputMessage("");
-    
     try {
+      // Verifica se la sessione è ancora attiva
+      if (!isSessionActive) {
+        // Se la sessione non è attiva, mostro un messaggio e non invio nulla
+        setMessages(prev => [
+          ...prev,
+          { role: 'assistant', content: 'La sessione non è attiva. Avvia una nuova sessione prima di inviare messaggi.' }
+        ]);
+        return;
+      }
+    
+      // Aggiungi il messaggio dell'utente
+      const userMessage: Message = { role: 'user', content: inputMessage };
+      setMessages(prev => [...prev, userMessage]);
+      setInputMessage("");
+      
       // Aggiungiamo un messaggio temporaneo di attesa
       setMessages(prev => [
         ...prev,
@@ -237,15 +277,23 @@ export default function ChatGPTInterface() {
       ]);
       
       // Invia il messaggio di testo
-      await apiClient.sendTextMessage(sessionId, inputMessage);
+      const result = await apiClient.sendTextMessage(sessionId, inputMessage);
       
-      // Non è necessario aggiungere manualmente la risposta perché verrà gestita 
-      // tramite gli eventi SSE (onResponse callback)
+      if (!result) {
+        // Rimuovi il messaggio di attesa
+        setMessages(prev => [
+          ...prev.slice(0, -1),
+          { role: 'assistant', content: 'Si è verificato un errore durante l\'invio del messaggio. Prova a riavviare la sessione.' }
+        ]);
+      }
+      
+      // Se invio riuscito, il messaggio di risposta verrà gestito tramite gli eventi SSE
+      
     } catch (error) {
       console.error("Errore nell'invio del messaggio:", error);
       setMessages(prev => [
         ...prev.slice(0, -1), // Rimuovi il messaggio di attesa
-        { role: 'assistant', content: 'Si è verificato un errore durante l\'invio del messaggio.' }
+        { role: 'assistant', content: 'Si è verificato un errore durante l\'invio del messaggio. Prova a riavviare la sessione.' }
       ]);
     }
   };
@@ -415,14 +463,23 @@ export default function ChatGPTInterface() {
       <div className="p-4">
         <div className="border rounded-2xl shadow-sm relative">
           <div className="p-3 min-h-[100px] flex flex-col">
-            <Input
-              className="border-0 shadow-none focus-visible:ring-0 placeholder:text-gray-400 text-base resize-none"
-              placeholder="Fai una domanda"
-              value={inputMessage}
-              onChange={(e) => setInputMessage(e.target.value)}
-              onKeyDown={handleKeyDown}
-              disabled={!isSessionActive}
-            />
+            <div className="flex">
+              <Input
+                className="border-0 shadow-none focus-visible:ring-0 placeholder:text-gray-400 text-base resize-none flex-grow"
+                placeholder="Fai una domanda"
+                value={inputMessage}
+                onChange={(e) => setInputMessage(e.target.value)}
+                onKeyDown={handleKeyDown}
+                disabled={!isSessionActive}
+              />
+              <Button
+                className="ml-2"
+                onClick={handleSendMessage}
+                disabled={!isSessionActive || !inputMessage.trim()}
+              >
+                Invia
+              </Button>
+            </div>
             <div className="mt-auto flex items-center justify-between pt-2">
               <div className="flex items-center space-x-2">
                 <Button

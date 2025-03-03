@@ -15,6 +15,7 @@ from flask_socketio import SocketIO, emit
 from openai import OpenAI
 from dotenv import load_dotenv
 import numpy as np
+import pyautogui
 
 from websocket_realtime_text_thread import WebSocketRealtimeTextThread
 from utils import ScreenshotManager
@@ -25,19 +26,22 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*", "supports_credentials": True, "allow_headers": ["Content-Type", "Authorization"]}}, expose_headers=["Content-Type"])
+CORS(app, resources={r"/api/*": {"origins": "*", 
+                               "allow_headers": ["Content-Type", "Authorization"],
+                               "allow_methods": ["GET", "POST", "OPTIONS"],
+                               "expose_headers": ["Content-Type", "Authorization"],
+                               "supports_credentials": True}})
 
-# Configura Socket.IO con opzioni più permissive
+# Configurazione avanzata di CORS per permettere tutte le origini e metodi
 socketio = SocketIO(
     app, 
     cors_allowed_origins="*", 
     async_mode='threading',
-    path='/socket.io',
-    logger=True,
-    engineio_logger=True,
-    always_connect=True,
     ping_timeout=60,
     ping_interval=25,
+    max_http_buffer_size=1e8,  # 100MB
+    engineio_logger=True,     # Abilita il logger di Engine.IO
+    logger=True              # Abilita il logger di Socket.IO
 )
 
 # Dizionario per gestire le sessioni attive
@@ -511,7 +515,7 @@ def create_session():
             "error": str(e)
         }), 500
 
-# Endpoint per avviare una sessione
+# Endpoint per avviare una sessione con parametri di query
 @app.route('/api/sessions/start', methods=['POST', 'OPTIONS'])
 def start_session():
     """Avvia una sessione esistente."""
@@ -544,18 +548,27 @@ def start_session():
         success = session.start_session()
         logger.info(f"Sessione {session_id} avviata con successo: {success}")
         
-        return jsonify({
+        response = jsonify({
             "success": True,
             "message": "Session started successfully."
         })
+        # Aggiungi CORS headers
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        return response
     except Exception as e:
         logger.error(f"Error starting session {session_id}: {str(e)}")
-        return jsonify({
+        response = jsonify({
             "success": False,
             "error": str(e)
         }), 500
+        # Aggiungi CORS headers anche in caso di errore
+        if isinstance(response, tuple):
+            response[0].headers['Access-Control-Allow-Origin'] = '*'
+        else:
+            response.headers['Access-Control-Allow-Origin'] = '*'
+        return response
 
-# Endpoint per terminare una sessione
+# Endpoint per terminare una sessione con parametri di query
 @app.route('/api/sessions/end', methods=['POST', 'OPTIONS'])
 def end_session():
     """Termina una sessione."""
@@ -572,37 +585,66 @@ def end_session():
     
     if not session_id:
         logger.warning("Tentativo di terminare sessione senza ID sessione")
-        return jsonify({
+        response = jsonify({
             "success": False,
             "error": "Session ID is required."
         }), 400
+        if isinstance(response, tuple):
+            response[0].headers['Access-Control-Allow-Origin'] = '*'
+        else:
+            response.headers['Access-Control-Allow-Origin'] = '*'
+        return response
     
     if session_id not in active_sessions:
         logger.warning(f"Tentativo di terminare sessione non esistente: {session_id}")
-        return jsonify({
-            "success": False,
-            "error": "Session not found."
-        }), 404
+        # Per maggiore robustezza, consideriamo la chiusura di una sessione non esistente come un'operazione riuscita
+        response = jsonify({
+            "success": True,
+            "message": "Session not found, considered as already ended."
+        })
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        return response
     
     try:
         session = active_sessions[session_id]
-        session.end_session()
-        # Rimuoviamo la sessione dalla memoria
-        del active_sessions[session_id]
-        logger.info(f"Sessione {session_id} terminata con successo")
+        # Gestione più robusta degli errori nel metodo end_session
+        try:
+            session.end_session()
+        except Exception as e:
+            logger.error(f"Errore durante end_session(), ma continuo con la rimozione: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
         
-        return jsonify({
+        # Rimuoviamo la sessione dalla memoria anche se ci sono stati errori in end_session
+        try:
+            del active_sessions[session_id]
+            logger.info(f"Sessione {session_id} rimossa dalla memoria")
+        except Exception as e:
+            logger.error(f"Errore rimuovendo la sessione dalla memoria: {str(e)}")
+        
+        logger.info(f"Procedura di chiusura sessione {session_id} completata")
+        
+        response = jsonify({
             "success": True,
             "message": "Session ended successfully."
         })
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        return response
     except Exception as e:
         logger.error(f"Error ending session {session_id}: {str(e)}")
-        return jsonify({
+        import traceback
+        logger.error(traceback.format_exc())
+        response = jsonify({
             "success": False,
             "error": str(e)
         }), 500
+        if isinstance(response, tuple):
+            response[0].headers['Access-Control-Allow-Origin'] = '*'
+        else:
+            response.headers['Access-Control-Allow-Origin'] = '*'
+        return response
 
-# Endpoint per ottenere gli aggiornamenti di una sessione
+# Endpoint per ottenere gli aggiornamenti in streaming con parametri di query
 @app.route('/api/sessions/stream', methods=['GET'])
 def stream_session_updates():
     """Stream degli aggiornamenti della sessione in tempo reale."""
@@ -642,7 +684,7 @@ def stream_session_updates():
             "error": str(e)
         }), 500
 
-# Endpoint per inviare un messaggio di testo
+# Endpoint per inviare un messaggio di testo con parametri di query
 @app.route('/api/sessions/text', methods=['POST'])
 def send_text_message():
     """Invia un messaggio di testo."""
@@ -696,7 +738,7 @@ def send_text_message():
             "error": str(e)
         }), 500
 
-# Endpoint per verificare lo stato di una sessione
+# Endpoint per verificare lo stato di una sessione con parametri di query
 @app.route('/api/sessions/status', methods=['GET', 'OPTIONS'])
 def get_session_status():
     """Verifica lo stato di una sessione."""

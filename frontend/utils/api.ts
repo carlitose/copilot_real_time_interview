@@ -11,6 +11,15 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/a
 // Modifichiamo l'URL del WebSocket per assicurarci che corrisponda al backend
 const WS_BASE_URL = process.env.NEXT_PUBLIC_WS_URL || 'http://127.0.0.1:8000';
 
+// Funzione di utilità per verificare la validità di un session ID
+const isValidSessionId = (sessionId: string): boolean => {
+  // Verifica che sia una stringa non vuota e che contenga solo numeri
+  return sessionId !== undefined && 
+         sessionId !== null && 
+         sessionId.trim() !== '' && 
+         /^\d+$/.test(sessionId);
+};
+
 // Tipi per le risposte dell'API
 
 export interface ApiResponse<T = any> {
@@ -148,19 +157,27 @@ export class IntervistaApiClient {
    */
   async createSession(): Promise<string> {
     try {
+      console.log('Creating new session...');
       const response = await fetch(`${this.baseUrl}/sessions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-        },
+          'Accept': 'application/json'
+        }
       });
 
-      const data: SessionResponse = await response.json();
-
-      if (!data.success) {
-        throw new Error(data.error || 'Failed to create session');
+      if (!response.ok) {
+        throw new Error(`Failed to create session: ${response.status} ${response.statusText}`);
       }
 
+      const data: SessionResponse = await response.json();
+      
+      if (!data.success || !data.session_id) {
+        throw new Error('Invalid response from server');
+      }
+      
+      console.log(`Session created with ID: ${data.session_id}`);
+      
       return data.session_id;
     } catch (error) {
       console.error('Error creating session:', error);
@@ -174,45 +191,46 @@ export class IntervistaApiClient {
    * @returns Promise con il risultato dell'operazione
    */
   async startSession(sessionId: string): Promise<boolean> {
+    if (!isValidSessionId(sessionId)) {
+      console.error('Invalid session ID:', sessionId);
+      return false;
+    }
+    
     try {
       // Creiamo un AbortController per il timeout, più compatibile con tutti i browser
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 secondi di timeout
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
       
-      try {
-        const response = await fetch(`${this.baseUrl}/sessions/${sessionId}/start`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          // Usiamo il signal dell'AbortController invece di AbortSignal.timeout
-          signal: controller.signal
-        });
-        
-        // Puliamo il timeout
-        clearTimeout(timeoutId);
-
-        const data: ApiResponse = await response.json();
-
-        if (!data.success) {
-          throw new Error(data.error || 'Failed to start session');
-        }
-
-        return true;
-      } catch (error: any) {
-        // Puliamo il timeout anche in caso di errore
-        clearTimeout(timeoutId);
-        
-        // Se è un errore di abort, lo trasformiamo in un errore di timeout
-        if (error.name === 'AbortError') {
-          throw new Error('Timeout while connecting to the server');
-        }
-        
-        throw error;
+      console.log(`Avvio sessione ${sessionId}...`);
+      // Utilizziamo il parametro nella query string anziché nel percorso
+      const response = await fetch(`${this.baseUrl}/sessions/start?sessionId=${sessionId}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        console.error(`Errore nell'avvio della sessione: ${response.status} ${response.statusText}`);
+        return false;
       }
+      
+      const data: ApiResponse = await response.json();
+      
+      if (!data.success) {
+        console.error(`Avvio sessione fallito: ${data.error || 'Unknown error'}`);
+        return false;
+      }
+      
+      console.log('Sessione avviata con successo');
+      return true;
     } catch (error) {
       console.error('Error starting session:', error);
-      throw error;
+      return false;
     }
   }
 
@@ -222,30 +240,54 @@ export class IntervistaApiClient {
    * @returns Promise con il risultato dell'operazione
    */
   async endSession(sessionId: string): Promise<boolean> {
+    if (!isValidSessionId(sessionId)) {
+      console.error('Invalid session ID:', sessionId);
+      return false;
+    }
+    
     try {
       // Ferma lo streaming audio se attivo
       this.stopAudioStream(sessionId);
       
-      const response = await fetch(`${this.baseUrl}/sessions/${sessionId}/end`, {
+      console.log(`Chiusura sessione ${sessionId}...`);
+      // Utilizziamo il parametro nella query string anziché nel percorso
+      const response = await fetch(`${this.baseUrl}/sessions/end?sessionId=${sessionId}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-        },
+          'Accept': 'application/json'
+        }
       });
-
-      const data: ApiResponse = await response.json();
-
-      if (!data.success) {
-        throw new Error(data.error || 'Failed to end session');
+      
+      if (!response.ok) {
+        console.error(`Errore nella chiusura della sessione: ${response.status} ${response.statusText}`);
+        return false;
       }
-
-      // Assicurati di chiudere la connessione SSE se attiva
+      
+      const data: ApiResponse = await response.json();
+      
+      if (!data.success) {
+        console.error(`Chiusura sessione fallita: ${data.error || 'Unknown error'}`);
+        return false;
+      }
+      
+      console.log('Sessione chiusa con successo');
+      
+      // Chiudi anche il socket.io
+      if (this.socket) {
+        this.socket.disconnect();
+        this.socket = null;
+      }
+      
+      // Chiudi l'EventSource
       this.closeEventStream();
-
+      
+      this.audioConnections.delete(sessionId);
+      
       return true;
     } catch (error) {
       console.error('Error ending session:', error);
-      throw error;
+      return false;
     }
   }
 
@@ -297,127 +339,123 @@ export class IntervistaApiClient {
       onConnectionError?: (error: Event) => void;
     }
   ): () => void {
+    if (!isValidSessionId(sessionId)) {
+      console.error('Invalid session ID for stream updates:', sessionId);
+      return () => {};
+    }
+    
     // Chiudi eventuali connessioni esistenti
     this.closeEventStream();
-
-    let isConnectionClosed = false;
-    let reconnectAttempts = 0;
-    const MAX_RECONNECT_ATTEMPTS = 3;
-    let hasReceived404 = false; // Flag per tracciare errori 404
-
+    
+    let retryCount = 0;
+    const MAX_RETRIES = 3;
+    
+    // Funzione per configurare l'EventSource
     const setupEventSource = () => {
-      if (isConnectionClosed || hasReceived404) return;
-
+      console.log(`Setting up new EventSource connection for session ${sessionId}...`);
+      
+      // Utilizziamo il parametro nella query string anziché nel percorso
+      const url = new URL(`${this.baseUrl}/sessions/stream`);
+      // Aggiungiamo l'ID della sessione come parametro di query
+      url.searchParams.append('sessionId', sessionId);
+      // Aggiungiamo un timestamp per evitare la cache del browser
+      url.searchParams.append('ts', Date.now().toString());
+      
       try {
-        console.log('Setting up new EventSource connection...');
-        this.eventSource = new EventSource(`${this.baseUrl}/sessions/${sessionId}/stream`);
-
-        // Registra gli handler per i vari tipi di eventi
-        if (callbacks.onTranscription) {
-          this.eventSource.addEventListener('transcription', (event) => {
-            if (isConnectionClosed) return;
-            try {
-              const data: TranscriptionUpdate = JSON.parse(event.data);
-              callbacks.onTranscription?.(data);
-            } catch (e) {
-              console.error('Error parsing transcription data:', e);
-            }
-          });
-        }
-
-        if (callbacks.onResponse) {
-          this.eventSource.addEventListener('response', (event) => {
-            if (isConnectionClosed) return;
-            try {
-              const data: ResponseUpdate = JSON.parse(event.data);
-              callbacks.onResponse?.(data);
-            } catch (e) {
-              console.error('Error parsing response data:', e);
-            }
-          });
-        }
-
-        if (callbacks.onError) {
-          this.eventSource.addEventListener('error', (event) => {
-            if (isConnectionClosed) return;
-            try {
-              const data: ErrorUpdate = JSON.parse((event as any).data || '{}');
-              callbacks.onError?.(data);
-            } catch (e) {
-              console.error('Error parsing error data:', e);
-            }
-          });
-        }
-
-        // Gestione errori di connessione
-        this.eventSource.onerror = async (error) => {
-          console.error('SSE connection error:', error);
-          
-          if (isConnectionClosed) {
-            this.closeEventStream();
-            return;
-          }
-
-          // Verifica se la sessione esiste ancora
-          try {
-            const response = await fetch(`${this.baseUrl}/sessions/${sessionId}/status`, {
-              method: 'GET',
-              headers: { 'Content-Type': 'application/json' }
-            });
-
-            if (response.status === 404) {
-              console.log('Session no longer exists, stopping reconnection attempts');
-              hasReceived404 = true;
-              this.closeEventStream();
-              callbacks.onConnectionError?.(new Event('sessionClosed'));
-              return;
-            }
-          } catch (checkError) {
-            console.error('Error checking session status:', checkError);
-          }
-
-          callbacks.onConnectionError?.(error);
-          
-          // Tentativo di riconnessione solo se non abbiamo ricevuto un 404
-          if (!hasReceived404 && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-            reconnectAttempts++;
-            console.log(`SSE reconnection attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`);
-            
-            // Aumenta il delay tra i tentativi (exponential backoff)
-            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 5000);
-            
-            setTimeout(() => {
-              if (!isConnectionClosed && !hasReceived404) {
-                this.closeEventStream();
-                setupEventSource();
-              }
-            }, delay);
-          } else {
-            console.error('Max SSE reconnection attempts reached or session closed');
-            this.closeEventStream();
-          }
-        };
-
-        // Reset del contatore di tentativi quando la connessione ha successo
+        // Creazione dell'EventSource (SSE)
+        this.eventSource = new EventSource(url.toString());
+        
+        // Gestione degli eventi di connessione
         this.eventSource.onopen = () => {
-          console.log('SSE connection established successfully');
-          reconnectAttempts = 0;
+          console.log('EventSource connection established');
+          retryCount = 0; // Resetta il contatore dei tentativi quando la connessione ha successo
         };
-
+        
+        // Gestione degli eventi di trascrizione
+        this.eventSource.addEventListener('transcription', (event) => {
+          try {
+            if (callbacks.onTranscription) {
+              const data = JSON.parse(event.data);
+              callbacks.onTranscription(data);
+            }
+          } catch (error) {
+            console.error('Error handling transcription event:', error);
+          }
+        });
+        
+        // Gestione degli eventi di risposta
+        this.eventSource.addEventListener('response', (event) => {
+          try {
+            if (callbacks.onResponse) {
+              const data = JSON.parse(event.data);
+              callbacks.onResponse(data);
+            }
+          } catch (error) {
+            console.error('Error handling response event:', error);
+          }
+        });
+        
+        // Gestione degli eventi di errore
+        this.eventSource.addEventListener('error', (event) => {
+          try {
+            if (callbacks.onError) {
+              // Se c'è un payload di errore, lo gestiamo come un evento di errore strutturato
+              if ((event as any).data) {
+                const data = JSON.parse((event as any).data);
+                callbacks.onError(data);
+              }
+            }
+            
+            // Gestiamo anche gli errori di connessione SSE
+            if (callbacks.onConnectionError) {
+              callbacks.onConnectionError(event);
+            }
+            
+            // Tentiamo di riconnettere se non abbiamo superato il numero massimo di tentativi
+            if (retryCount < MAX_RETRIES) {
+              console.log(`EventSource connection error. Retry attempt ${retryCount + 1}/${MAX_RETRIES}...`);
+              retryCount++;
+              
+              // Chiudiamo la connessione esistente
+              if (this.eventSource) {
+                this.eventSource.close();
+                this.eventSource = null;
+              }
+              
+              // Tentiamo di riconnetterci dopo un breve ritardo
+              setTimeout(() => {
+                setupEventSource();
+              }, 1000 * retryCount); // Aumentiamo progressivamente il ritardo
+            } else {
+              console.error('Max EventSource retry attempts exceeded');
+              if (callbacks.onConnectionError) {
+                callbacks.onConnectionError(new Event('maxretries'));
+              }
+            }
+          } catch (error) {
+            console.error('Error handling error event:', error);
+          }
+        });
+        
+        // Gestione della chiusura
+        this.eventSource.addEventListener('close', () => {
+          console.log('EventSource connection closed by server');
+          this.eventSource = null;
+        });
+        
       } catch (error) {
         console.error('Error setting up EventSource:', error);
-        callbacks.onConnectionError?.(new Event('error'));
+        if (callbacks.onConnectionError) {
+          callbacks.onConnectionError(new Event('setup'));
+        }
       }
     };
-
-    // Avvia la connessione SSE
+    
+    // Inizializza l'EventSource
     setupEventSource();
-
-    // Restituisci la funzione per chiudere lo stream
+    
+    // Funzione di pulizia da restituire per useEffect
     return () => {
-      console.log('Closing SSE connection voluntarily');
-      isConnectionClosed = true;
-      hasReceived404 = true; // Impediamo ulteriori tentativi di riconnessione
       this.closeEventStream();
     };
   }
@@ -445,22 +483,46 @@ export class IntervistaApiClient {
    * @returns Promise con il risultato dell'operazione
    */
   async sendTextMessage(sessionId: string, text: string): Promise<boolean> {
+    if (!isValidSessionId(sessionId)) {
+      console.error('Invalid session ID for sending text message:', sessionId);
+      return false;
+    }
+    
     try {
-      const response = await fetch(`${this.baseUrl}/sessions/${sessionId}/text`, {
+      console.log(`Invio messaggio di testo alla sessione ${sessionId}: "${text}"`);
+      
+      // Utilizziamo il parametro nella query string anziché nel percorso
+      const response = await fetch(`${this.baseUrl}/sessions/text?sessionId=${sessionId}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ text }),
       });
-
-      const data: ApiResponse = await response.json();
-
-      if (!data.success) {
-        throw new Error(data.error || 'Failed to send text message');
+      
+      console.log(`Risposta del server: ${response.status} ${response.statusText}`);
+      
+      // Verifica se la risposta è valida
+      if (!response.ok) {
+        console.error(`Errore HTTP: ${response.status} ${response.statusText}`);
+        throw new Error(`HTTP error! Status: ${response.status}`);
       }
-
-      return true;
+      
+      // Controlla se la risposta contiene JSON valido
+      const textResponse = await response.text();
+      console.log(`Risposta completa: ${textResponse}`);
+      
+      try {
+        const data = JSON.parse(textResponse);
+        if (!data.success) {
+          throw new Error(data.error || 'Failed to send text message');
+        }
+        return true;
+      } catch (jsonError) {
+        console.error('Errore nel parsing della risposta JSON:', jsonError);
+        console.error('Testo ricevuto:', textResponse);
+        throw new Error('Invalid JSON response from server');
+      }
     } catch (error) {
       console.error('Error sending text message:', error);
       throw error;
@@ -613,7 +675,7 @@ export class IntervistaApiClient {
       try {
         // Prima, assicuriamoci che la sessione sia avviata
         console.log("Avvio della sessione prima dello streaming audio...");
-        const startResponse = await fetch(`${this.baseUrl}/sessions/${sessionId}/start`, {
+        const startResponse = await fetch(`${this.baseUrl}/sessions/start?sessionId=${sessionId}`, {
           method: 'POST',
           headers: { 
             'Content-Type': 'application/json',
@@ -630,7 +692,7 @@ export class IntervistaApiClient {
         }
         
         // Ora verifichiamo lo stato
-        const statusResponse = await fetch(`${this.baseUrl}/sessions/${sessionId}/status`, {
+        const statusResponse = await fetch(`${this.baseUrl}/sessions/status?sessionId=${sessionId}`, {
           method: 'GET',
           headers: { 
             'Content-Type': 'application/json',
