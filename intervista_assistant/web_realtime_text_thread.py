@@ -9,6 +9,7 @@ import threading
 import base64
 import numpy as np
 import pathlib
+import uuid
 
 import websocket
 import pyaudio
@@ -45,14 +46,21 @@ class WebRealtimeTextThread:
         self.max_reconnect_attempts = 3
         self.main_thread = None
         
+        # Path to the system prompt file
+        self.system_prompt_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 
+            "system_prompt.json"
+        )
+        
         # Audio configuration
         self.recording = False
         self.audio_buffer = []
-        self.accumulated_audio = b''
+        self.accumulated_audio = b''  # Buffer per l'audio dal microfono
+        self.external_audio_buffer = b''  # Buffer per l'audio esterno ricevuto via socket.io
         self.CHUNK = 1024
         self.FORMAT = pyaudio.paInt16
         self.CHANNELS = 1
-        self.RATE = 16000
+        self.RATE = 24000  # Impostato a 24kHz per compatibilità con OpenAI
         self.p = None
         self.stream = None
         
@@ -65,6 +73,26 @@ class WebRealtimeTextThread:
         self.silence_start_time = 0
         self.last_commit_time = 0
         self.response_pending = False
+        self.lock = threading.Lock()  # Per sincronizzare l'accesso alle risorse
+        
+        # Nuovo: Gestione buffer audio migliorata
+        self.audio_accumulation_time = 0  # Tempo accumulato di audio (ms)
+        self.min_audio_before_commit = 2000  # Minimo 2s di audio prima di inviare
+        self.commit_delay = 0.05  # 50ms di ritardo tra invio audio e commit
+        self.last_audio_send_time = 0  # Per tracciare l'ultimo invio di audio
+        self.last_commit_send_time = 0  # Per tracciare l'ultimo commit inviato
+        
+        # Websocket e stato
+        self.websocket = None
+        self.websocket_app = None
+        
+        # API token from environment
+        self.api_key = os.environ.get("OPENAI_API_KEY", "")
+        if not self.api_key:
+            logger.error("OPENAI_API_KEY not found in environment variables")
+        
+        # System message
+        self.system_prompt = self._load_system_prompt()
         
         # Buffer to accumulate audio transcription deltas and response
         self._response_transcript_buffer = ""
@@ -72,15 +100,6 @@ class WebRealtimeTextThread:
         
         # Variable to hold the final transcription
         self.current_text = ""
-        
-        # Lock for thread-safe operations
-        self.lock = threading.Lock()
-        
-        # Path to the system prompt file
-        self.system_prompt_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), 
-            "system_prompt.json"
-        )
     
     def emit_transcription(self, text):
         """Emits a transcription event."""
@@ -112,99 +131,87 @@ class WebRealtimeTextThread:
         """Loads the system prompt from the external JSON file."""
         try:
             with open(self.system_prompt_path, 'r', encoding='utf-8') as f:
-                system_message = json.load(f)
+                system_message_json = json.load(f)
+                # Ora valorizziamo solo il testo del prompt invece dell'intero oggetto
+                system_text = system_message_json["item"]["content"][0]["text"]
             logger.info("System prompt loaded from file: %s", self.system_prompt_path)
-            return system_message
+            return system_text
         except Exception as e:
             logger.error("Error loading system prompt from file: %s", str(e))
             # Fallback to default system prompt
-            return {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "message",
-                    "role": "system",
-                    "content": [{
-                        "type": "input_text",
-                        "text": "You are an AI assistant for job interviews, specialized in questions for software engineers. Respond concisely and structured."
-                    }]
-                }
-            }
+            return "You are an AI assistant for job interviews, specialized in questions for software engineers. Respond concisely and structured."
     
     async def realtime_session(self):
-        """Manages a communication session via Realtime API."""
+        """
+        Establishes and manages the WebSocket connection to the OpenAI Realtime API.
+        """
+        logger.info("[WEBSOCKET] Starting realtime session")
+        
         try:
-            self.emit_transcription("Connecting to Realtime API...")
-            
             url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
-            headers = [
-                "Authorization: Bearer " + os.getenv('OPENAI_API_KEY'),
+            self.headers = [
+                f"Authorization: Bearer {self.api_key}",
                 "OpenAI-Beta: realtime=v1",
                 "Content-Type: application/json"
             ]
             
-            with self.lock:
-                self.connected = False
-                self.websocket = None
+            # Reset connection state
+            self.connected = False
+            self.websocket = None
             
+            # Define WebSocket callbacks
             def on_open(ws):
-                logger.info("WebSocket connection established")
+                logger.info("[WEBSOCKET] Connection established")
                 with self.lock:
                     self.connected = True
                 self.emit_connection_status(True)
-                self.last_event_time = time.time()
-                self.current_text = ""
                 
+                # Configure session with audio and text capabilities
                 session_config = {
-                    "event_id": "event_123",
                     "type": "session.update",
                     "session": {
-                        "modalities": ["text", "audio"],
-                        "instructions": "You are a helpful assistant for job interview coaching.",
-                        "voice": "sage",
-                        "input_audio_format": "pcm16",
-                        "output_audio_format": "pcm16",
+                        "modalities": ["text", "audio"],  # Abilita sia testo che audio
+                        "input_audio_format": "pcm16",  # Specifica formato audio in ingresso
+                        "output_audio_format": "pcm16", # Specifica formato audio in uscita
                         "input_audio_transcription": {
                             "model": "whisper-1"
                         },
-                        "turn_detection": {
-                            "type": "server_vad",
-                            "threshold": 0.5,
-                            "prefix_padding_ms": 300,
-                            "silence_duration_ms": 500,
-                            "create_response": True
-                        },
-                        "tool_choice": "auto",
-                        "temperature": 0.8,
-                        "max_response_output_tokens": "inf"
+                        "tool_choice": "auto"  # Importante per versioni recenti dell'API
                     }
                 }
                 
-                try:
-                    ws.send(json.dumps(session_config))
-                    logger.info("Session configuration sent (audio and text)")
-                except Exception as e:
-                    logger.error("Error sending configuration: " + str(e))
+                logger.info("[WEBSOCKET] Sending session configuration")
+                ws.send(json.dumps(session_config))
                 
-                # Load the system prompt from external file
-                system_message = self._load_system_prompt()
-                
-                try:
+                # Send system prompt
+                if self.system_prompt:
+                    system_message = {
+                        "type": "conversation.item.create",
+                        "item": {
+                            "type": "message",
+                            "role": "system",
+                            "content": [{"type": "input_text", "text": self.system_prompt}]
+                        }
+                    }
+                    logger.info("[WEBSOCKET] Sending system prompt")
                     ws.send(json.dumps(system_message))
-                    logger.info("System prompt message sent")
-                except Exception as e:
-                    logger.error("Error sending system prompt message: " + str(e))
-                
-                response_request = {
-                    "type": "response.create",
-                    "response": {"modalities": ["text"]}
-                }
-                try:
+                    
+                    # Invia un segnale iniziale per ottenere una prima risposta
+                    welcome_message = {
+                        "type": "conversation.item.create",
+                        "item": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "Please confirm you're ready to assist with the interview."}]
+                        }
+                    }
+                    ws.send(json.dumps(welcome_message))
+                    logger.info("[WEBSOCKET] Sent initial prompt to get first response")
+                    
+                    response_request = {"type": "response.create", "response": {"modalities": ["text"]}}
                     ws.send(json.dumps(response_request))
-                    logger.info("Response request sent")
-                except Exception as e:
-                    logger.error("Error sending response request: " + str(e))
-                
-                self.emit_transcription("Connected! Ready for the interview. Speak to ask questions.")
+                    with self.lock:
+                        self.response_pending = True
             
             def on_message(ws, message):
                 try:
@@ -256,24 +263,54 @@ class WebRealtimeTextThread:
                 logger.info(f"WebSocket connection closed: {close_status_code} - {close_msg}")
                 with self.lock:
                     self.connected = False
-                self.emit_connection_status(False)
-                
-                with self.lock:
+                    prev_reconnect = self.reconnect_attempts
                     self.reconnect_attempts += 1
+                    should_reconnect = self.running and self.reconnect_attempts <= self.max_reconnect_attempts
                     reconnect_msg = f"\n[Connection lost. Reconnection attempt {self.reconnect_attempts}/{self.max_reconnect_attempts}]"
                 
+                # Notifica l'UI
+                self.emit_connection_status(False)
                 self.transcription_buffer += reconnect_msg
                 self.emit_transcription(self.transcription_buffer)
                 
-                with self.lock:
-                    should_reconnect = self.running and self.reconnect_attempts <= self.max_reconnect_attempts
+                # Decidere se riconnettersi in base allo stato attuale
+                logger.info(f"Reconnection status: should_reconnect={should_reconnect}, running={self.running}, attempts={self.reconnect_attempts}/{self.max_reconnect_attempts}")
                 
                 if should_reconnect:
-                    self.emit_error("Reconnection needed")
+                    try:
+                        # Evita di avviare due tentativi di riconnessione in parallelo
+                        if prev_reconnect < self.reconnect_attempts:
+                            logger.info(f"Attempting reconnection ({self.reconnect_attempts}/{self.max_reconnect_attempts})...")
+                            
+                            # Attesa con backoff esponenziale
+                            wait_time = min(2 ** self.reconnect_attempts, 10)  # max 10 secondi di attesa
+                            logger.info(f"Waiting {wait_time} seconds before reconnection...")
+                            
+                            # Segnala la necessità di riconnettersi
+                            self.emit_error("Reconnection needed")
+                            
+                            # Usa un thread separato per non bloccare il thread principale
+                            def delayed_reconnect():
+                                time.sleep(wait_time)
+                                if self.running:
+                                    try:
+                                        logger.info("Starting reconnection thread")
+                                        reconnect_thread = threading.Thread(target=run_websocket)
+                                        reconnect_thread.daemon = True
+                                        reconnect_thread.start()
+                                    except Exception as e:
+                                        logger.error(f"Error starting reconnection thread: {str(e)}")
+                            
+                            # Avvia il thread di riconnessione
+                            threading.Thread(target=delayed_reconnect, daemon=True).start()
+                    except Exception as e:
+                        logger.error(f"Error during reconnection process: {str(e)}")
+                else:
+                    logger.warning("Maximum reconnection attempts reached or session stopped, giving up")
             
             websocket_app = websocket.WebSocketApp(
                 url,
-                header=headers,
+                header=self.headers,
                 on_open=on_open,
                 on_message=on_message,
                 on_error=on_error,
@@ -546,10 +583,16 @@ class WebRealtimeTextThread:
             audio_size = len(self.accumulated_audio)
         
         try:
+            # Assicuriamoci che ci sia abbastanza audio (minimo 100ms)
+            min_bytes = int(self.RATE * 0.1) * 2  # 100ms di audio a RATE Hz (2 bytes per sample)
+            if audio_size < min_bytes:
+                logger.warning(f"[AUDIO] Buffer troppo piccolo ({audio_size}/{min_bytes} bytes), non invio")
+                return
+            
             logger.info(f"[AUDIO] Preparing to send audio to OpenAI: {audio_size} bytes")
             base64_audio = base64.b64encode(self.accumulated_audio).decode('ascii')
-            logger.info(f"[AUDIO] Audio encoded in base64: {len(base64_audio)} characters")
             
+            # Inviamo l'audio esattamente come fa la versione desktop - semplice e senza parametri extra
             audio_message = {
                 "type": "conversation.item.create",
                 "item": {
@@ -558,30 +601,30 @@ class WebRealtimeTextThread:
                     "content": [{"type": "input_audio", "audio": base64_audio}]
                 }
             }
-            logger.info(f"[AUDIO] Sending audio message to OpenAI (WebSocket)")
+            
+            logger.info(f"[AUDIO] Sending audio message to OpenAI ({audio_size} bytes)")
             ws.send(json.dumps(audio_message))
-            logger.info(f"[AUDIO] Audio successfully sent to OpenAI: {audio_size} bytes")
+            logger.info(f"[AUDIO] Audio successfully sent to OpenAI")
         except Exception as e:
             logger.error(f"[AUDIO] Error sending audio to OpenAI: {str(e)}")
+    
     def send_text(self, text):
         """
-        Sends a text message to the model through the websocket connection.
+        Invia un messaggio testuale al modello via WebSocket.
         
         Args:
             text: The text message to send
             
         Returns:
-            bool: True if the send was successful, False otherwise
+            bool: True if the message was sent successfully, False otherwise
         """
         with self.lock:
-            has_connection = self.connected and self.websocket
+            if not self.connected or not self.websocket:
+                return False
+            ws = self.websocket
         
-        if not has_connection:
-            logger.error("Cannot send text: WebSocket not connected")
-            return False
-            
         try:
-            # Create the text message
+            # Create a text message in the format expected by the API
             text_message = {
                 "type": "conversation.item.create",
                 "item": {
@@ -591,8 +634,8 @@ class WebRealtimeTextThread:
                 }
             }
             
+            # Check if there's already a response pending
             with self.lock:
-                ws = self.websocket
                 is_pending = self.response_pending
             
             # Send the message through the websocket
@@ -621,64 +664,129 @@ class WebRealtimeTextThread:
         Aggiunge dati audio esterni (dalla socket.io) al buffer audio.
         
         Args:
-            audio_data: I dati audio da aggiungere (bytes)
+            audio_data: I dati audio da aggiungere (array o bytes)
             
         Returns:
             bool: True se l'aggiunta è riuscita, False altrimenti
         """
-        audio_size = len(audio_data) if isinstance(audio_data, bytes) else 'non-binary'
-        # Manteniamo un log essenziale senza dettagli specifici
-        logger.info(f"[AUDIO] Ricevuti dati audio esterni: dimensione={audio_size}")
-        
-        with self.lock:
-            if not self.connected or not self.websocket:
-                logger.error("[AUDIO] Impossibile aggiungere dati audio: WebSocket non connesso")
+        try:
+            # Converti i dati in format bytes se necessario
+            audio_bytes = None
+            if isinstance(audio_data, bytes):
+                audio_bytes = audio_data
+            elif isinstance(audio_data, np.ndarray):
+                audio_bytes = audio_data.tobytes()
+            elif isinstance(audio_data, list):
+                # Converti liste di numeri in np.ndarray e poi in bytes
+                audio_array = np.array(audio_data, dtype=np.int16)
+                audio_bytes = audio_array.tobytes()
+            else:
+                logger.error(f"[AUDIO] Tipo di dati audio non supportato: {type(audio_data)}")
                 return False
             
-            ws = self.websocket
-        
-        try:
-            # Se i dati audio sono sufficienti, inviali direttamente
-            if len(audio_data) >= 3200:  # Minimo di audio necessario
-                # Invia audio come messaggio base64
-                # Rimuoviamo log verbosi sulla codifica
-                base64_audio = base64.b64encode(audio_data).decode('ascii')
+            audio_size = len(audio_bytes)
+            # Calcolo durata approssimativa dell'audio (in ms)
+            approx_duration_ms = (audio_size / 2) / (self.RATE / 1000)
+            logger.info(f"[AUDIO] Ricevuti dati audio esterni: dimensione={audio_size}, durata={approx_duration_ms:.2f}ms")
+            
+            with self.lock:
+                # Aggiungi i dati al buffer accumulato
+                self.external_audio_buffer += audio_bytes
+                self.audio_accumulation_time += approx_duration_ms
                 
+                # Se il websocket non è connesso, mantieni in buffer per invio successivo
+                if not self.connected or not self.websocket:
+                    logger.warning(f"[AUDIO] WebSocket non connesso. Dati audio in buffer per futuro invio (buffer size={len(self.external_audio_buffer)} bytes)")
+                    return False
+                
+                # Se non c'è abbastanza audio accumulato, attendi ancora
+                if self.audio_accumulation_time < self.min_audio_before_commit:
+                    logger.info(f"[AUDIO] Accumulati {self.audio_accumulation_time:.2f}ms di audio (min. richiesto: {self.min_audio_before_commit}ms)")
+                    return True
+                
+                # Se c'è una risposta pendente, non inviare altro audio ancora
+                if self.response_pending:
+                    logger.info(f"[AUDIO] Risposta già in attesa. Accumulando audio (buffer={len(self.external_audio_buffer)} bytes).")
+                    return True
+                
+                # Verifica che il buffer contenga abbastanza dati per evitare errori
+                if len(self.external_audio_buffer) < 2000:  # Assicurati che ci siano almeno 2KB di dati audio
+                    logger.warning(f"[AUDIO] Buffer troppo piccolo ({len(self.external_audio_buffer)} bytes). Continuo ad accumulare.")
+                    return True
+                
+                # Prepariamo una copia locale del buffer audio (per usarla fuori dal lock)
+                send_buffer = self.external_audio_buffer
+                buffer_duration_ms = self.audio_accumulation_time
+                
+                # Reset del buffer PRIMA di rilasciare il lock
+                self.external_audio_buffer = b''
+                self.audio_accumulation_time = 0
+                self.last_audio_send_time = time.time()
+                
+                # Cattura il websocket mentre abbiamo il lock
+                ws = self.websocket
+            
+            # Converti audio in base64
+            base64_audio = base64.b64encode(send_buffer).decode('ascii')
+            
+            # Log dettagliato delle dimensioni e durata
+            logger.info(f"[AUDIO] Preparazione messaggio audio: {len(send_buffer)} bytes, {buffer_duration_ms:.2f}ms")
+            
+            # Usiamo il formato corretto per l'API OpenAI Realtime
+            try:
+                # Controlla ancora una volta lo stato della connessione
+                if not ws or not self.connected:
+                    logger.warning("[AUDIO] WebSocket disconnesso durante preparazione messaggio, annullo invio")
+                    return False
+                
+                # 1. Invia il messaggio audio usando il formato corretto per l'API
+                # Formato corretto secondo la documentazione: input_audio_buffer.append
                 audio_message = {
-                    "type": "conversation.item.create",
-                    "item": {
-                        "type": "message",
-                        "role": "user",
-                        "content": [{"type": "input_audio", "audio": base64_audio}]
-                    }
+                    "event_id": f"audio_{int(time.time()*1000)}",
+                    "type": "input_audio_buffer.append",
+                    "audio": base64_audio
                 }
-                logger.info("[AUDIO] Invio messaggio audio a OpenAI...")
+                
+                logger.info(f"[AUDIO] Invio messaggio audio: {len(send_buffer)} bytes, durata={buffer_duration_ms:.2f}ms")
                 ws.send(json.dumps(audio_message))
                 logger.info("[AUDIO] Messaggio audio inviato con successo")
                 
-                # Invia commit per elaborare l'audio
-                commit_message = {"type": "input_audio_buffer.commit"}
-                ws.send(json.dumps(commit_message))
-                logger.info("[AUDIO] Commit audio inviato")
+                # Breve pausa prima del commit
+                time.sleep(self.commit_delay)
                 
-                # Richiedi una risposta se non ce n'è già una in corso
+                # 2. Invia un commit nel formato corretto
+                commit_message = {
+                    "event_id": f"commit_{int(time.time()*1000)}",
+                    "type": "input_audio_buffer.commit"
+                }
+                ws.send(json.dumps(commit_message))
+                logger.info(f"[AUDIO] Commit audio inviato dopo {self.commit_delay*1000:.0f}ms")
+                
+                # 3. Invia una richiesta di risposta
                 with self.lock:
                     is_pending = self.response_pending
                 
                 if not is_pending:
-                    response_request = {"type": "response.create", "response": {"modalities": ["text"]}}
+                    # Richiedi una risposta dopo l'invio dell'audio
+                    response_request = {
+                        "type": "response.create",
+                        "response": {"modalities": ["text"]}
+                    }
                     ws.send(json.dumps(response_request))
                     logger.info("[AUDIO] Richiesta risposta inviata")
                     with self.lock:
                         self.response_pending = True
                 else:
-                    logger.info("[AUDIO] Risposta già in corso, nessuna nuova richiesta inviata")
-            else:
-                logger.warning(f"[AUDIO] Buffer audio troppo piccolo ({len(audio_data)} bytes), non invio")
-            
-            return True
-            
+                    logger.warning("[AUDIO] Risposta già in attesa, nuova richiesta non inviata")
+                
+                return True
+            except Exception as e:
+                error_msg = f"[AUDIO] Errore durante invio audio: {str(e)}"
+                logger.error(error_msg)
+                self.emit_error(error_msg)
+                return False
         except Exception as e:
-            error_msg = f"[AUDIO] Errore elaborazione dati audio esterni: {str(e)}"
+            error_msg = f"Errore durante l'aggiunta dei dati audio: {str(e)}"
             logger.error(error_msg)
+            self.emit_error(error_msg)
             return False 

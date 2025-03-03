@@ -77,59 +77,66 @@ class SessionManager:
     
     def start_session(self):
         """
-        Starts a new session and prepares the connection with the OpenAI API.
-        Does not start audio recording automatically.
+        Start the session by initializing the communication with the OpenAI API.
+        
+        Returns:
+            tuple: (success, error_message)
         """
-        if not self.recording:
-            self.recording = True
+        try:
+            if self.recording:
+                logger.info(f"Session {self.session_id} already started")
+                return True, None
+                
+            logger.info(f"Starting session {self.session_id}")
             
-            # Configure callbacks for real-time API communication
+            # Create a new WebRealtimeTextThread instance
             callbacks = {
-                'on_transcription': self.handle_transcription,
-                'on_response': self.handle_response,
-                'on_error': self.handle_error,
-                'on_connection_status': self.handle_connection_status
+                'on_transcription': lambda text: self.handle_transcription(text),
+                'on_response': lambda text: self.handle_response(text),
+                'on_error': lambda message: self.handle_error(message),
+                'on_connection_status': lambda connected: self.handle_connection_status(connected)
             }
             
-            # Initialize the thread for real-time communication
-            self.text_thread = WebRealtimeTextThread(callbacks=callbacks)
+            self.text_thread = WebRealtimeTextThread(callbacks)
             
-            # Start the thread and get a reference to it
-            thread = self.text_thread.start()
+            # Start the WebSocket communication
+            self.text_thread.start()
             
-            # Wait for the connection before considering the session started
-            max_wait_time = 10  # seconds
-            start_time = time.time()
+            # Mark the session as recording
+            self.recording = True
+            self.updates = {
+                'transcription': '',
+                'response': '',
+                'error': '',
+                'connection_status': False
+            }
             
-            # Use a lock when checking the connected status
-            while time.time() - start_time < max_wait_time:
-                # Safe way to check the connected status
-                if hasattr(self.text_thread, 'lock'):
-                    with self.text_thread.lock:
-                        if self.text_thread.connected:
-                            break
-                else:
-                    # Fallback if no lock attribute
-                    if getattr(self.text_thread, 'connected', False):
-                        break
-                time.sleep(0.1)
+            # Update the last activity timestamp
+            self.last_activity = datetime.now()
             
-            # Check if connection was established
-            is_connected = False
-            if hasattr(self.text_thread, 'lock'):
-                with self.text_thread.lock:
-                    is_connected = self.text_thread.connected
-            else:
-                is_connected = getattr(self.text_thread, 'connected', False)
-                
-            if not is_connected:
-                logger.error(f"Connection timeout for session {self.session_id}")
-                self.recording = False
-                return False
+            # Wait for the WebSocket to initialize (max 2 seconds)
+            max_wait = 2  # seconds
+            wait_interval = 0.1  # seconds
+            waited = 0
+            
+            while waited < max_wait:
+                if self.text_thread.connected:
+                    logger.info(f"WebSocket connection established after {waited:.1f} seconds")
+                    break
+                waited += wait_interval
+                time.sleep(wait_interval)
+            
+            # We continue even if the WebSocket is not yet connected
+            # The client will receive updates through the SSE stream
             
             logger.info(f"Session {self.session_id} started successfully")
-            return True
-        return False
+            return True, None
+            
+        except Exception as e:
+            error_msg = f"Error starting session: {str(e)}"
+            logger.error(error_msg)
+            self.handle_error(error_msg)
+            return False, error_msg
     
     def end_session(self):
         """Ends the current session and frees resources."""
@@ -585,32 +592,49 @@ def create_session():
 @app.route('/api/sessions/start', methods=['POST', 'OPTIONS'])
 @require_session
 def start_session():
-    """Starts an existing session."""
+    """Starts a session with the specified session_id."""
     if request.method == 'OPTIONS':
         return jsonify({"success": True}), 200
         
     session_id = request.json.get('session_id')
-    session = active_sessions[session_id]
     
-    # Check if the session is already started
-    if session.recording:
+    if not session_id or session_id not in active_sessions:
         return jsonify({
-            "success": True,
-            "message": "Session already started"
-        }), 200
+            "success": False,
+            "error": "Session not found"
+        }), 404
     
-    # Start the session
-    success = session.start_session()
+    session = active_sessions[session_id]
+    success, error = session.start_session()
     
     if success:
+        # Aggiungiamo un piccolo delay per dare il tempo alla WebSocket di connettersi
+        # prima di restituire la risposta
+        max_wait = 3  # secondi massimi di attesa
+        wait_interval = 0.1  # intervallo di check in secondi
+        waited = 0
+        
+        # Attendiamo che la WebSocket sia effettivamente connessa
+        while waited < max_wait:
+            if session.text_thread and session.text_thread.connected:
+                logger.info(f"WebSocket connessa dopo {waited:.1f} secondi")
+                break
+            time.sleep(wait_interval)
+            waited += wait_interval
+            
+        if not (session.text_thread and session.text_thread.connected):
+            logger.warning(f"Timeout attesa connessione WebSocket dopo {max_wait} secondi")
+            # Continuiamo comunque, la connessione potrebbe stabilirsi più tardi
+        
         return jsonify({
             "success": True,
-            "message": "Session started successfully"
+            "message": "Session started successfully",
+            "websocket_connected": session.text_thread and session.text_thread.connected
         }), 200
     else:
         return jsonify({
             "success": False,
-            "error": "Unable to start the session"
+            "error": error
         }), 500
 
 @app.route('/api/sessions/end', methods=['POST', 'OPTIONS'])
@@ -805,14 +829,18 @@ def handle_audio_data(session_id, audio_data):
     Handles audio data received from the client.
     This is the ONLY way to send audio data to the backend.
     """
-    acknowledgement = {'received': False, 'error': None}
+    acknowledgement = {
+        'received': False, 
+        'error': None,
+        'timestamp': time.time(),
+        'session_active': session_id in active_sessions
+    }
     
     try:
         # Log only essential metadata about the audio data
         audio_type = type(audio_data).__name__
         if isinstance(audio_data, list):
             audio_length = len(audio_data)
-            # Rimuoviamo il logging dei sample values che crea log enormi
             logger.info(f"[SOCKET.IO:AUDIO] Received audio data for session {session_id}: {audio_length} samples, type={audio_type}")
             acknowledgement['samples'] = audio_length
         elif isinstance(audio_data, bytes):
@@ -829,6 +857,7 @@ def handle_audio_data(session_id, audio_data):
             return acknowledgement
         
         session = active_sessions[session_id]
+        acknowledgement['session_recording'] = session.recording
         
         # Check if the session is recording
         if not session.recording or not session.text_thread:
@@ -837,9 +866,6 @@ def handle_audio_data(session_id, audio_data):
             acknowledgement['error'] = 'Session not recording'
             return acknowledgement
         
-        # Process the audio data and send it to the WebRealtimeTextThread
-        # Rimuoviamo questo log per ridurre la verbosità
-        
         # Check if audio_data is not empty
         if not audio_data:
             logger.warning(f"[SOCKET.IO:AUDIO] Empty audio data received for session {session_id}")
@@ -847,28 +873,104 @@ def handle_audio_data(session_id, audio_data):
             return acknowledgement
             
         try:
-            # Convert to numpy array if it's a list
-            if isinstance(audio_data, list):
-                audio_data = np.array(audio_data, dtype=np.int16)
-                # Riduciamo i dettagli nel log
-                logger.info(f"[SOCKET.IO:AUDIO] Converted list to numpy array for session {session_id}")
+            # Aggiorna la timestamp di ultima attività
+            session.last_activity = datetime.now()
             
-            # Process the audio data with the text thread
+            # Verifica e converte l'audio nel formato corretto
+            if isinstance(audio_data, list):
+                # Controllo per valori validi in base ai requisiti PCM 16-bit
+                if any(not isinstance(sample, (int, float)) for sample in audio_data):
+                    logger.error(f"[SOCKET.IO:AUDIO] Invalid audio data format: non-numeric samples")
+                    acknowledgement['error'] = 'Invalid audio data format'
+                    emit('error', {'message': 'Invalid audio data format: non-numeric samples'})
+                    return acknowledgement
+                
+                # Verifica che ci siano abbastanza campioni (almeno 10ms di audio a 24kHz = 240 campioni)
+                if len(audio_data) < 240:
+                    logger.warning(f"[SOCKET.IO:AUDIO] Audio clip too short: {len(audio_data)} samples")
+                    acknowledgement['warning'] = 'Audio clip too short'
+                
+                # Normalizza gli valori per garantire compatibilità con PCM 16-bit (-32768 a 32767)
+                max_value = max(abs(sample) if isinstance(sample, int) else abs(float(sample)) for sample in audio_data)
+                
+                # Se i valori sono troppo grandi o troppo piccoli, normalizzali
+                if max_value > 32767 or max_value < 1:
+                    logger.info(f"[SOCKET.IO:AUDIO] Normalizing audio samples: max value = {max_value}")
+                    if max_value > 0:  # Evita divisione per zero
+                        scaling_factor = 32767.0 / max_value
+                        audio_data = [int(sample * scaling_factor) for sample in audio_data]
+                
+                # Assicuriamoci che sia del tipo corretto per OpenAI (16-bit PCM)
+                audio_data = np.array(audio_data, dtype=np.int16)
+                logger.info(f"[SOCKET.IO:AUDIO] Converted list to numpy array for session {session_id}: {len(audio_data)} samples")
+                
+                # Calcola la durata dell'audio ricevuto (assumendo 24kHz)
+                audio_duration_ms = (len(audio_data) / 24000) * 1000
+                logger.info(f"[SOCKET.IO:AUDIO] Approximate audio duration: {audio_duration_ms:.2f}ms at 24kHz")
+                acknowledgement['duration_ms'] = audio_duration_ms
+            
+            # Check websocket connection status
+            websocket_connected = False
+            websocket_reconnect_attempts = 0
             if session.text_thread:
-                session.text_thread.add_audio_data(audio_data)
+                websocket_connected = session.text_thread.connected
+                websocket_reconnect_attempts = session.text_thread.reconnect_attempts
+            
+            acknowledgement['websocket_connected'] = websocket_connected
+            acknowledgement['websocket_reconnect_attempts'] = websocket_reconnect_attempts
+            
+            if not websocket_connected:
+                logger.warning(f"[SOCKET.IO:AUDIO] WebSocket not connected for session {session_id}, handling gracefully...")
+                
+                # Se il thread esiste ma la connessione è persa, registriamo info addizionali per il debug
+                if session.text_thread:
+                    with session.text_thread.lock:
+                        running = session.text_thread.running
+                    logger.info(f"[SOCKET.IO:AUDIO] Thread info - running: {running}, reconnect attempts: {websocket_reconnect_attempts}")
+                
+                # Verifichiamo se dovremmo provare a ricollegarci o notificare l'errore al frontend
+                if session.text_thread and session.text_thread.reconnect_attempts < session.text_thread.max_reconnect_attempts:
+                    logger.info(f"[SOCKET.IO:AUDIO] Forwarding audio to thread for buffering")
+                    
+                    # Anche senza connessione, inoltriamo comunque i dati al thread
+                    # che li bufferizzerà e li invierà quando la connessione sarà ripristinata
+                    emit('connection_status', {'connected': False, 'reconnecting': True})
+                else:
+                    # Troppi tentativi di riconnessione falliti, notifichiamo il client
+                    logger.error(f"[SOCKET.IO:AUDIO] WebSocket reconnection failed after {websocket_reconnect_attempts} attempts")
+                    acknowledgement['error'] = 'WebSocket connection failed'
+                    emit('error', {'message': 'WebSocket connection failed, please restart the session'})
+                    return acknowledgement
+            
+            # Aggiungiamo i dati audio al buffer del text thread
+            if session.text_thread:
+                # Ora possiamo inviare i dati al text thread
+                success = session.text_thread.add_audio_data(audio_data)
+                acknowledgement['received'] = success
+                
+                # Aggiungi info sulla dimensione dei dati
+                if isinstance(audio_data, np.ndarray):
+                    acknowledgement['bytes_processed'] = audio_data.nbytes
+                elif isinstance(audio_data, bytes):
+                    acknowledgement['bytes_processed'] = len(audio_data)
+                else:
+                    acknowledgement['bytes_processed'] = 'unknown'
+                
+                # Aggiorniamo lo stato per il frontend
+                if success:
+                    emit('audio_processed', {'success': True, 'bytes': acknowledgement.get('bytes_processed', 0)})
+            
         except Exception as e:
             logger.error(f"[SOCKET.IO:AUDIO] Error processing audio in text thread: {str(e)}")
-            acknowledgement['error'] = f'Error in text thread: {str(e)}'
-            return acknowledgement
+            acknowledgement['error'] = f"Audio processing error: {str(e)}"
+            emit('error', {'message': f'Audio processing error: {str(e)}'})
         
-        # Add success acknowledgement at the end of the function
-        acknowledgement['received'] = True
-        logger.info(f"[SOCKET.IO:AUDIO] Successfully processed audio data for session {session_id}")
         return acknowledgement
         
     except Exception as e:
-        logger.error(f"[SOCKET.IO:AUDIO] Error processing audio data: {str(e)}")
-        acknowledgement['error'] = str(e)
+        # Catch-all for unexpected errors
+        logger.error(f"[SOCKET.IO:AUDIO] Unexpected error: {str(e)}")
+        acknowledgement['error'] = f"Unexpected error: {str(e)}"
         return acknowledgement
 
 # Periodic task to clean up inactive sessions
