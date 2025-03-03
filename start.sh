@@ -31,7 +31,8 @@ fi
 # Avvia il backend
 echo "Avvio del backend API (FastAPI)..."
 cd "$BACKEND_DIR" 
-python -m api_launcher &
+# Imposto PYTHONPATH per includere la directory corrente
+PYTHONPATH="$BACKEND_DIR:$PYTHONPATH" python api_launcher.py &
 BACKEND_PID=$!
 echo "Backend avviato con PID: $BACKEND_PID"
 
