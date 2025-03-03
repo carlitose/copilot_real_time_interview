@@ -48,6 +48,9 @@ if [ ! -d "$FRONTEND_DIR" ]; then
   exit 1
 fi
 
+# Create log directory if it doesn't exist
+mkdir -p "$SCRIPT_DIR/logs"
+
 # Start the backend
 echo "Starting the backend API..."
 cd "$BACKEND_DIR" 
@@ -64,7 +67,8 @@ else
   export FLASK_RELOADER=0
 fi
 
-python api_launcher.py &
+# Run backend with output to console instead of background
+python api_launcher.py 2>&1 | tee "$SCRIPT_DIR/logs/backend.log" &
 BACKEND_PID=$!
 echo "Backend started with PID: $BACKEND_PID"
 
@@ -72,10 +76,12 @@ echo "Backend started with PID: $BACKEND_PID"
 echo "Waiting for the backend to be ready..."
 sleep 5
 
-# Start the frontend
+# Start the frontend in another terminal window on macOS
 echo "Starting the frontend (Next.js)..."
 cd "$FRONTEND_DIR" 
-npm run dev &
+
+# Run frontend with output to console instead of background
+npm run dev 2>&1 | tee "$SCRIPT_DIR/logs/frontend.log" &
 FRONTEND_PID=$!
 echo "Frontend started with PID: $FRONTEND_PID"
 
@@ -100,6 +106,12 @@ if [ "$WATCH_MODE" = true ]; then
   echo "Backend and frontend will reload automatically when files change"
   echo "====================================================="
 fi
+
+echo "====================================================="
+echo "Logs are being written to:"
+echo "  Backend: $SCRIPT_DIR/logs/backend.log"
+echo "  Frontend: $SCRIPT_DIR/logs/frontend.log"
+echo "====================================================="
 
 # Keep the script running
 echo "The application is running. Press Ctrl+C to terminate."

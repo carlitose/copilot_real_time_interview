@@ -167,8 +167,8 @@ export default function ChatGPTInterface() {
       console.log("Stopping the session...");
       
       // Stop audio recording if active
-      if (isRecording && audioControl) {
-        audioControl.stop();
+      if (isRecording) {
+        audioStreamControl.stop();
         setIsRecording(false);
       }
       
@@ -198,32 +198,34 @@ export default function ChatGPTInterface() {
         try {
           sid = await apiClient.createSession();
           setSessionId(sid);
-          console.log(`New session created: ${sid}`);
         } catch (error) {
           console.error("Error creating session:", error);
           return;
         }
       }
       
-      // Start the session on the server
       try {
-        const success = await apiClient.startSession(sid);
+        // Start the session on the server
+        await apiClient.startSession(sid);
+        setIsSessionActive(true);
         
-        if (success) {
-          console.log(`Session ${sid} started successfully`);
-          setIsSessionActive(true);
-          
-          // Automatically start audio recording after a slight delay
-          // to ensure the session is fully established
-          setTimeout(() => {
-            if (!isRecording) {
-              console.log("Automatically starting audio recording...");
-              toggleRecording(); // Use the existing function
-            }
-          }, 500);
+        // Avvia automaticamente la registrazione audio
+        console.log("Avvio automatico della registrazione audio...");
+        
+        // Verifica che audioStreamControl sia inizializzato correttamente
+        if (audioStreamControl) {
+          try {
+            audioStreamControl.start();
+            console.log("Registrazione audio avviata con successo");
+            setIsRecording(true);
+          } catch (error) {
+            console.error("Errore nell'avvio della registrazione audio:", error);
+            alert("C'è stato un problema nell'attivazione del microfono. Per favore, controlla i permessi del browser.");
+          }
         } else {
-          console.error(`Error starting session ${sid}`);
+          console.error("audioStreamControl non inizializzato correttamente");
         }
+        
       } catch (error) {
         console.error("Error starting session:", error);
       }
@@ -371,27 +373,46 @@ export default function ChatGPTInterface() {
     setMessages([]);
   };
 
-  const toggleRecording = () => {
-    if (!isSessionActive) return;
-    
-    // Create the audio control if it doesn't exist
-    if (!audioControl && sessionId) {
-      const control = useAudioStream(sessionId);
-      setAudioControl(control);
-      
-      // Start recording
-      control.start();
-      setIsRecording(true);
-    } else if (audioControl) {
-      // Toggle recording state
-      if (isRecording) {
-        audioControl.stop();
-      } else {
-        audioControl.start();
+  // Inizializza l'audio control con l'hook useAudioStream
+  const audioStreamControl = useAudioStream(sessionId || '');
+  
+  // Effect per monitorare cambiamenti di sessionId e aggiornare lo stato di registrazione
+  useEffect(() => {
+    console.log(`sessionId aggiornato: ${sessionId}`);
+    // Se la sessione è attiva e isRecording è true, ma audioStreamControl non è attivo,
+    // prova a riavviare la registrazione
+    if (isSessionActive && isRecording && audioStreamControl && !audioStreamControl.isActive) {
+      console.log('Tentativo di riattivazione della registrazione audio dopo cambio sessionId');
+      try {
+        audioStreamControl.start();
+      } catch (error) {
+        console.error('Errore nella riattivazione della registrazione audio:', error);
       }
-      
-      setIsRecording(!isRecording);
     }
+  }, [sessionId, isSessionActive, isRecording, audioStreamControl]);
+
+  const toggleRecording = () => {
+    if (!isSessionActive || !sessionId) {
+      alert('Per favore, avvia prima una sessione.');
+      return;
+    }
+    
+    // Usa direttamente l'audioStreamControl invece di crearlo condizionalmente
+    if (!isRecording) {
+      console.log('Attivazione microfono in corso...');
+      try {
+        audioStreamControl.start();
+      } catch (error) {
+        console.error('Errore nell\'attivazione del microfono:', error);
+        alert('C\'è stato un problema nell\'attivazione del microfono. Assicurati di aver dato i permessi necessari.');
+        return;
+      }
+    } else {
+      audioStreamControl.stop();
+      console.log('Microfono disattivato.');
+    }
+    
+    setIsRecording(!isRecording);
   };
 
   return (

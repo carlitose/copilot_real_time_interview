@@ -33,14 +33,18 @@ except ImportError:
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    filename='backend.log'
+    handlers=[
+        logging.FileHandler('backend.log'),
+        logging.StreamHandler()  # Aggiunto handler per la console
+    ]
 )
 logger = logging.getLogger(__name__)
+logger.info("Backend server started")
 
 # Flask and SocketIO initialization
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", logger=True, engineio_logger=True)  # Abilitato logging per Socket.IO
 
 # OpenAI client for non-real-time functionalities
 client = OpenAI()
@@ -801,73 +805,75 @@ def handle_audio_data(session_id, audio_data):
     Handles audio data received from the client.
     This is the ONLY way to send audio data to the backend.
     """
+    acknowledgement = {'received': False, 'error': None}
+    
     try:
-        logger.debug(f"Received audio data for session {session_id}: {len(audio_data) if isinstance(audio_data, bytes) else 'non-binary'} bytes")
+        # Log additional details about the audio data
+        audio_type = type(audio_data).__name__
+        if isinstance(audio_data, list):
+            audio_length = len(audio_data)
+            sample_values = str(audio_data[:5]) + "..." if audio_length > 5 else str(audio_data)
+            logger.info(f"[SOCKET.IO:AUDIO] Received audio data for session {session_id}: {audio_length} samples, type={audio_type}, first samples={sample_values}")
+            acknowledgement['samples'] = audio_length
+        elif isinstance(audio_data, bytes):
+            logger.info(f"[SOCKET.IO:AUDIO] Received audio data for session {session_id}: {len(audio_data)} bytes, type={audio_type}")
+            acknowledgement['bytes'] = len(audio_data)
+        else:
+            logger.info(f"[SOCKET.IO:AUDIO] Received audio data for session {session_id}: type={audio_type}")
+            acknowledgement['type'] = audio_type
         
         if session_id not in active_sessions:
-            logger.error(f"Session {session_id} not found")
+            logger.error(f"[SOCKET.IO:AUDIO] Session {session_id} not found")
             emit('error', {'message': 'Session not found'})
-            return
+            acknowledgement['error'] = 'Session not found'
+            return acknowledgement
         
         session = active_sessions[session_id]
         
         # Check if the session is recording
         if not session.recording or not session.text_thread:
-            logger.warning(f"Session {session_id} not recording")
+            logger.warning(f"[SOCKET.IO:AUDIO] Session {session_id} not recording")
             emit('error', {'message': 'Session not recording'})
-            return
+            acknowledgement['error'] = 'Session not recording'
+            return acknowledgement
         
-        try:
-            # Process audio data based on format
-            if isinstance(audio_data, bytes):
-                # Use binary data directly
-                processed_audio = audio_data
-                logger.info(f"[AUDIO] Processing binary audio data: {len(processed_audio)} bytes")
-            elif isinstance(audio_data, str) and audio_data.startswith('data:audio'):
-                # Handle base64 encoded data URL
-                try:
-                    # Extract the actual base64 content after the comma
-                    base64_content = audio_data.split(',', 1)[1]
-                    processed_audio = base64.b64decode(base64_content)
-                    logger.info(f"[AUDIO] Decoded base64 audio data: {len(processed_audio)} bytes")
-                except Exception as e:
-                    logger.error(f"Error decoding base64 audio: {str(e)}")
-                    emit('error', {'message': 'Invalid audio format'})
-                    return
-            else:
-                # Interpret as an array of samples
-                try:
-                    samples = np.array(audio_data, dtype=np.int16)
-                    processed_audio = samples.tobytes()
-                    logger.info(f"[AUDIO] Converted array to binary audio: {len(processed_audio)} bytes")
-                except Exception as e:
-                    logger.error(f"Error converting audio data: {str(e)}")
-                    emit('error', {'message': 'Invalid audio format'})
-                    return
+        # Process the audio data and send it to the WebRealtimeTextThread
+        logger.info(f"[SOCKET.IO:AUDIO] Processing audio data for session {session_id}")
+        
+        # Check if audio_data is not empty
+        if not audio_data:
+            logger.warning(f"[SOCKET.IO:AUDIO] Empty audio data received for session {session_id}")
+            acknowledgement['error'] = 'Empty audio data'
+            return acknowledgement
             
-            # Send audio data to the thread
-            logger.info(f"[AUDIO] Forwarding {len(processed_audio)} bytes to WebRealtimeTextThread.add_audio_data()")
-            if hasattr(session.text_thread, 'add_audio_data'):
-                success = session.text_thread.add_audio_data(processed_audio)
-                if success:
-                    logger.info(f"[AUDIO] Successfully sent {len(processed_audio)} bytes to OpenAI via WebRealtimeTextThread")
-                else:
-                    logger.warning("[AUDIO] Unable to add audio data to the thread")
-                    emit('error', {'message': 'Unable to process audio data'})
+        try:
+            # Convert to numpy array if it's a list
+            if isinstance(audio_data, list):
+                audio_data = np.array(audio_data, dtype=np.int16)
+                logger.info(f"[SOCKET.IO:AUDIO] Converted list to numpy array: shape={audio_data.shape}, dtype={audio_data.dtype}")
+            
+            # Process the audio data with the text thread
+            if session.text_thread:
+                session.text_thread.process_audio(audio_data)
+                logger.info(f"[SOCKET.IO:AUDIO] Audio data sent to text thread for processing")
             else:
-                logger.error("[AUDIO] text_thread does not have the method add_audio_data")
-                emit('error', {'message': 'Internal server error'})
-                
+                logger.error(f"[SOCKET.IO:AUDIO] Text thread not available for session {session_id}")
+                acknowledgement['error'] = 'Text thread not available'
+                return acknowledgement
         except Exception as e:
-            logger.error(f"Error processing audio data: {str(e)}")
-            emit('error', {'message': f'Internal error: {str(e)}'})
-            
-    except Exception as outer_e:
-        logger.error(f"Critical error in handle_audio_data: {str(outer_e)}")
-        try:
-            emit('error', {'message': 'Critical server error'})
-        except:
-            pass
+            logger.error(f"[SOCKET.IO:AUDIO] Error processing audio in text thread: {str(e)}")
+            acknowledgement['error'] = f'Error in text thread: {str(e)}'
+            return acknowledgement
+        
+        # Add success acknowledgement at the end of the function
+        acknowledgement['received'] = True
+        logger.info(f"[SOCKET.IO:AUDIO] Successfully processed audio data for session {session_id}")
+        return acknowledgement
+        
+    except Exception as e:
+        logger.error(f"[SOCKET.IO:AUDIO] Error processing audio data: {str(e)}")
+        acknowledgement['error'] = str(e)
+        return acknowledgement
 
 # Periodic task to clean up inactive sessions
 def cleanup_inactive_sessions():
