@@ -190,7 +190,7 @@ class SessionManager:
         
         logger.info(f"Transcription: {text[:50]}...")
     
-    def handle_response(self, text):
+    def handle_response(self, text, final=False):
         """Handles response updates from the real-time API."""
         self.last_activity = datetime.now()
         if not text:
@@ -208,7 +208,8 @@ class SessionManager:
         timestamp = datetime.now().isoformat()
         self.response_updates.append({
             "timestamp": timestamp,
-            "text": text
+            "text": text,
+            "final": final
         })
         
         logger.info(f"Response: {text[:50]}...")
@@ -237,36 +238,47 @@ class SessionManager:
         logger.info(f"Connection status for session {self.session_id}: {'connected' if connected else 'disconnected'}")
     
     def get_updates(self, update_type=None):
-        """Returns updates based on the type and removes them from the queue."""
+        """
+        Gets all updates of the specified type.
+        If update_type is None, returns all updates.
+        """
         if update_type == "transcription":
-            updates = self.transcription_updates.copy()
-            self.transcription_updates = []
-            return updates
+            return self.transcription_updates
         elif update_type == "response":
-            updates = self.response_updates.copy()
-            self.response_updates = []
-            return updates
+            return self.response_updates
         elif update_type == "error":
-            updates = self.error_updates.copy()
-            self.error_updates = []
-            return updates
+            return self.error_updates
         elif update_type == "connection":
-            updates = self.connection_updates.copy()
-            self.connection_updates = []
-            return updates
-        else:
-            # Return all updates
-            all_updates = {
-                "transcription": self.transcription_updates.copy(),
-                "response": self.response_updates.copy(),
-                "error": self.error_updates.copy(),
-                "connection": self.connection_updates.copy()
-            }
-            self.transcription_updates = []
-            self.response_updates = []
-            self.error_updates = []
-            self.connection_updates = []
+            return self.connection_updates
+        elif update_type is None:
+            # If no type is specified, return all updates as a flat list
+            all_updates = []
+            
+            for update in self.transcription_updates:
+                update_copy = update.copy()
+                update_copy["type"] = "transcription"
+                all_updates.append(update_copy)
+                
+            for update in self.response_updates:
+                update_copy = update.copy()
+                update_copy["type"] = "response"
+                all_updates.append(update_copy)
+                
+            for update in self.error_updates:
+                update_copy = update.copy()
+                update_copy["type"] = "error"
+                all_updates.append(update_copy)
+                
+            for update in self.connection_updates:
+                update_copy = update.copy()
+                update_copy["type"] = "connection"
+                all_updates.append(update_copy)
+                
+            # Sort updates by timestamp
+            all_updates.sort(key=lambda x: x["timestamp"])
             return all_updates
+        else:
+            return []
     
     def send_text_message(self, text):
         """Sends a text message to the model."""
@@ -329,8 +341,12 @@ class SessionManager:
     def _analyze_image_async(self, messages, image_data):
         """Performs image analysis asynchronously."""
         try:
+            # Send a processing notification
+            self.handle_response("Sto analizzando lo screenshot...", final=False)
+            
+            # Call OpenAI API for image analysis
             response = client.chat.completions.create(
-                model="gpt-4-vision-preview",
+                model="gpt-4o",
                 messages=messages,
                 max_tokens=4000
             )
@@ -343,18 +359,22 @@ class SessionManager:
                 "content": assistant_response
             })
             
+            # Log the response
+            logger.info(f"Image analysis response: {assistant_response[:100]}...")
+            
             # Send the response as an update
-            self.handle_response(assistant_response)
+            self.handle_response(assistant_response, final=True)
             
             # Also send a message through the real-time thread to maintain context
             if self.text_thread and self.text_thread.connected:
-                context_msg = "[I have analyzed the screenshot you sent me. If you have specific questions, feel free to ask!]"
+                context_msg = "[Ho analizzato lo screenshot che mi hai inviato. Se hai domande specifiche, sentiti libero di chiedere!]"
                 self.text_thread.send_text(context_msg)
             
             logger.info("Image analysis completed successfully")
             
         except Exception as e:
             error_message = f"Error analyzing image: {str(e)}"
+            logger.error(error_message)
             self.handle_error(error_message)
     
     def _prepare_messages_with_history(self, base64_image=None):
@@ -731,6 +751,26 @@ def send_text_message():
 def process_screenshot():
     """Processes a screenshot sent from the frontend."""
     session_id = request.json.get('session_id')
+    monitor_index = request.json.get('monitor_index')
+    
+    if monitor_index is None:
+        return jsonify({
+            "success": False,
+            "error": "No monitor index provided"
+        }), 400
+    
+    # TODO: Implement screenshot capture from backend
+    # This is a placeholder for now
+    return jsonify({
+        "success": False,
+        "error": "Backend screenshot capture not implemented"
+    }), 501
+
+@app.route('/api/sessions/analyze-screenshot', methods=['POST'])
+@require_session
+def analyze_screenshot():
+    """Analyzes a screenshot captured by the frontend."""
+    session_id = request.json.get('session_id')
     image_data = request.json.get('image_data')
     
     if not image_data:
@@ -743,19 +783,36 @@ def process_screenshot():
     if image_data.startswith('data:'):
         image_data = image_data.split(',')[1]
     
-    session = active_sessions[session_id]
-    success, error = session.process_screenshot(image_data)
-    
-    if success:
-        return jsonify({
-            "success": True,
-            "message": "Screenshot processed successfully"
-        }), 200
-    else:
+    try:
+        # Validate the base64 image data
+        base64.b64decode(image_data)
+        
+        session = active_sessions[session_id]
+        logger.info(f"Processing screenshot for session {session_id} (size: {len(image_data) // 1024}KB)")
+        
+        # Add immediate feedback through the SSE channel
+        session.handle_response("Ricevuto screenshot. Sto analizzando l'immagine...", final=False)
+        
+        success, error = session.process_screenshot(image_data)
+        
+        if success:
+            logger.info(f"Screenshot successfully processed for session {session_id}")
+            return jsonify({
+                "success": True,
+                "message": "Screenshot analyzed successfully"
+            }), 200
+        else:
+            logger.error(f"Error processing screenshot for session {session_id}: {error}")
+            return jsonify({
+                "success": False,
+                "error": error
+            }), 500
+    except Exception as e:
+        logger.error(f"Exception processing screenshot for session {session_id}: {str(e)}")
         return jsonify({
             "success": False,
-            "error": error
-        }), 500
+            "error": f"Invalid image data: {str(e)}"
+        }), 400
 
 @app.route('/api/sessions/think', methods=['POST'])
 @require_session
@@ -1024,100 +1081,114 @@ def cleanup_inactive_sessions():
             # Continue with other sessions even if one fails
             continue
 
-# Generatore SSE per gli aggiornamenti della sessione
+# Utility functions for the API
+def format_sse(data):
+    """Format data as SSE event."""
+    return f"data: {data}\n\n"
+
 def session_sse_generator(session_id):
-    """Genera eventi SSE per gli aggiornamenti della sessione."""
-    try:
-        logger.info(f"SSE connection established for session {session_id}")
-        
-        # Invia un messaggio di connessione iniziale
-        connection_event = json.dumps({
-            "type": "connection", 
-            "connected": True, 
+    """
+    Generator for SSE events from a session.
+    This stays open and continues to yield events.
+    """
+    session = active_sessions.get(session_id)
+    
+    if not session:
+        logger.error(f"SSE generator: Session {session_id} not found")
+        yield format_sse(json.dumps({
+            "type": "error",
+            "message": "Session not found",
             "session_id": session_id
-        })
-        yield f"data: {connection_event}\n\n"
+        }))
+        return
+    
+    # Send initial connection status
+    session.handle_connection_status(True)
+    
+    # Keep track of the last update processed
+    last_update_index = 0
+    
+    try:
+        # Initial heartbeat
+        yield format_sse(json.dumps({
+            "type": "heartbeat",
+            "timestamp": datetime.now().isoformat(),
+            "session_id": session_id
+        }))
         
-        # Contatore per heartbeat
-        heartbeat_counter = 0
-        
+        # Main loop for sending updates
         while session_id in active_sessions:
-            # Invia un heartbeat ogni 30 cicli (circa 3 secondi)
-            heartbeat_counter += 1
-            if heartbeat_counter >= 30:
-                heartbeat_counter = 0
-                yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': datetime.now().isoformat()})}\n\n"
+            # Get all updates of any type
+            all_updates = session.get_updates()
+            new_updates = all_updates[last_update_index:]
             
-            session = active_sessions[session_id]
-            updates = session.get_updates()
+            # Send any new updates
+            for update in new_updates:
+                # Convert the update to an SSE event
+                event_data = {}
+                
+                if "text" in update:
+                    if "transcription" in update["type"]:
+                        event_data = {
+                            "type": "transcription",
+                            "text": update["text"],
+                            "session_id": session_id
+                        }
+                    elif "response" in update["type"]:
+                        final = update.get("final", True)  # Default to True for backward compatibility
+                        event_data = {
+                            "type": "response",
+                            "text": update["text"],
+                            "session_id": session_id,
+                            "final": final
+                        }
+                elif "message" in update:
+                    event_data = {
+                        "type": "error",
+                        "message": update["message"],
+                        "session_id": session_id
+                    }
+                elif "connected" in update:
+                    event_data = {
+                        "type": "connection",
+                        "connected": update["connected"],
+                        "session_id": session_id
+                    }
+                
+                if event_data:
+                    # Send debug log for response events
+                    if event_data.get("type") == "response":
+                        logger.info(f"Sending {event_data.get('final', False)} response to client: {event_data.get('text', '')[:50]}...")
+                    
+                    yield format_sse(json.dumps(event_data))
             
-            has_updates = False
+            # Update the last update index
+            last_update_index = len(all_updates)
             
-            # Invia gli aggiornamenti di trascrizione
-            for update in updates["transcription"]:
-                has_updates = True
-                event_data = {
-                    "type": "transcription",
-                    "text": update["text"],
-                    "session_id": session_id
-                }
-                logger.debug(f"Sending transcription update: {update['text'][:50]}...")
-                yield f"data: {json.dumps(event_data)}\n\n"
+            # Send a heartbeat every 5 seconds to keep the connection alive
+            yield format_sse(json.dumps({
+                "type": "heartbeat",
+                "timestamp": datetime.now().isoformat(),
+                "session_id": session_id
+            }))
             
-            # Invia gli aggiornamenti di risposta
-            for update in updates["response"]:
-                has_updates = True
-                event_data = {
-                    "type": "response",
-                    "text": update["text"],
-                    "session_id": session_id,
-                    "final": True  # Consideriamo tutte le risposte come finali
-                }
-                logger.info(f"Sending response to client: {update['text'][:50]}...")
-                yield f"data: {json.dumps(event_data)}\n\n"
-            
-            # Invia gli aggiornamenti di errore
-            for update in updates["error"]:
-                has_updates = True
-                event_data = {
-                    "type": "error",
-                    "message": update["message"],
-                    "session_id": session_id
-                }
-                logger.warning(f"Sending error message: {update['message']}")
-                yield f"data: {json.dumps(event_data)}\n\n"
-            
-            # Invia gli aggiornamenti di connessione
-            for update in updates["connection"]:
-                has_updates = True
-                event_data = {
-                    "type": "connection",
-                    "connected": update["connected"],
-                    "session_id": session_id
-                }
-                logger.debug(f"Sending connection update: {'connected' if update['connected'] else 'disconnected'}")
-                yield f"data: {json.dumps(event_data)}\n\n"
-            
-            # Log se abbiamo inviato qualche aggiornamento
-            if has_updates:
-                logger.debug(f"Updates sent to client for session {session_id}")
-            
-            # Aggiorna l'attività se il client è ancora connesso
-            session.last_activity = datetime.now()
-            
-            # Pausa breve per evitare carico eccessivo
-            time.sleep(0.1)
+            # Sleep to prevent CPU overuse
+            time.sleep(1)
             
     except GeneratorExit:
-        logger.info(f"Client disconnected from SSE stream for session {session_id}")
+        logger.info(f"SSE connection closed for session {session_id}")
+        # Notify the session that the connection is closed
+        if session_id in active_sessions:
+            active_sessions[session_id].handle_connection_status(False)
     except Exception as e:
-        logger.error(f"Error in SSE stream for session {session_id}: {str(e)}")
-        error_data = {
+        logger.error(f"Error in SSE generator for session {session_id}: {str(e)}")
+        yield format_sse(json.dumps({
             "type": "error",
-            "message": str(e),
+            "message": f"Server error: {str(e)}",
             "session_id": session_id
-        }
-        yield f"data: {json.dumps(error_data)}\n\n"
+        }))
+    finally:
+        logger.info(f"SSE generator exiting for session {session_id}")
 
 # Avvia il task di pulizia ogni minuto
 @socketio.on('connect')

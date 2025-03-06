@@ -184,6 +184,37 @@ const apiClient = {
   },
   
   /**
+   * Sends a captured screenshot to the backend for analysis
+   * @param sessionId ID of the session
+   * @param imageData Base64 encoded image data
+   * @returns Promise with the result of the operation
+   */
+  async sendScreenshot(sessionId: string, imageData: string): Promise<boolean> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/sessions/analyze-screenshot`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ 
+          session_id: sessionId,
+          image_data: imageData
+        }),
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Error sending screenshot: ${response.status}`);
+      }
+      
+      const data = await response.json() as ApiResponse;
+      return data.success;
+    } catch (error) {
+      console.error('Error sending screenshot:', error);
+      return false;
+    }
+  },
+  
+  /**
    * Starts the "thinking" process
    * @param sessionId ID of the session
    * @returns Promise with the result of the operation

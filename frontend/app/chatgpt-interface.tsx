@@ -14,6 +14,7 @@ import {
   ResponseUpdate, 
   ErrorUpdate
 } from "@/utils/eventStream"
+import { getAvailableScreens, captureScreenshot, ScreenInfo } from "@/utils/screenCapture"
 
 // Constant for the API base URL
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/api';
@@ -25,6 +26,9 @@ export default function ChatGPTInterface() {
   const [messages, setMessages] = useState<Message[]>([])
   const [inputMessage, setInputMessage] = useState("")
   const [selectedScreen, setSelectedScreen] = useState("screen1")
+  const [availableScreens, setAvailableScreens] = useState<ScreenInfo[]>([])
+  const [isScreenSelectOpen, setIsScreenSelectOpen] = useState(false)
+  const [isCapturingScreen, setIsCapturingScreen] = useState(false)
   const [isRecording, setIsRecording] = useState<boolean>(false)
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [audioControl, setAudioControl] = useState<AudioStreamControl | null>(null)
@@ -73,8 +77,29 @@ export default function ChatGPTInterface() {
         return newMessages;
       }
       
-      // If it's the final response or there are no assistant messages, add a new message
+      // For screenshot analysis or final responses, add a new message
       console.log(`Adding new assistant message with text: ${update.text.substring(0, 50)}...`);
+      
+      // Find and remove any waiting message if this is a screenshot response
+      if (update.text.includes("screenshot") || update.text.includes("schermo")) {
+        // Look for a temporary message about screenshot or screen
+        const waitingMsgIndex = prevMessages.findIndex(m => 
+          m.role === 'assistant' && 
+          (m.content.includes('Catturando') || 
+           m.content.includes('Screenshot') || 
+           m.content.includes('analizzando lo schermo'))
+        );
+        
+        if (waitingMsgIndex !== -1) {
+          console.log(`Found waiting message at index: ${waitingMsgIndex}, replacing it`);
+          const newMessages = [...prevMessages];
+          newMessages[waitingMsgIndex] = {
+            role: 'assistant',
+            content: update.text
+          };
+          return newMessages;
+        }
+      }
       
       return [...prevMessages, {
         role: 'assistant',
@@ -380,27 +405,58 @@ export default function ChatGPTInterface() {
     if (!sessionId || !isSessionActive) return;
     
     try {
-      // Get the monitor index
-      const monitorIndex = selectedScreen.replace('screen', '');
+      setIsCapturingScreen(true);
       
-      // Add a waiting message
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Capturing and analyzing the screen...' }]);
+      // Add a waiting message with a unique identifier
+      const messageId = `screenshot-${Date.now()}`;
+      // @ts-ignore - Adding temporary id for tracking this message
+      setMessages(prev => [...prev, { 
+        role: 'assistant', 
+        content: 'Catturando e analizzando lo schermo... (attendi alcuni secondi)',
+        id: messageId 
+      }]);
       
-      // Capture and analyze the screenshot
-      await apiClient.takeScreenshot(sessionId, monitorIndex);
+      // Capture the screenshot from the browser
+      const imageData = await captureScreenshot(selectedScreen);
+      
+      if (imageData) {
+        // Show a preview of the captured screenshot (optional)
+        setMessages(prev => prev.map(msg => 
+          // @ts-ignore - Using temporary id for tracking
+          msg.id === messageId ? 
+          { ...msg, content: 'Catturando e analizzando lo schermo... (immagine inviata al server)' } : 
+          msg
+        ));
+        
+        // Send the captured screenshot to the backend
+        const success = await apiClient.sendScreenshot(sessionId, imageData);
+        
+        if (!success) {
+          throw new Error("Errore nell'invio dello screenshot al backend");
+        }
+        
+        // Let the user know we're waiting for analysis
+        setMessages(prev => prev.map(msg => 
+          // @ts-ignore - Using temporary id for tracking
+          msg.id === messageId ? 
+          { ...msg, content: 'Screenshot inviato! In attesa dell\'analisi dal server...' } : 
+          msg
+        ));
+      } else {
+        throw new Error("Impossibile catturare lo screenshot");
+      }
       
       // The response will be handled via SSE events
     } catch (error) {
       console.error("Error capturing screenshot:", error);
       
-      // Remove the waiting message
-      setMessages(prev => prev.slice(0, prev.length - 1));
-      
       // Add an error message
       setMessages(prev => [
         ...prev,
-        { role: 'assistant', content: 'An error occurred while capturing the screenshot.' }
+        { role: 'assistant', content: `Si è verificato un errore durante la cattura dello screenshot: ${error instanceof Error ? error.message : 'Errore sconosciuto'}` }
       ]);
+    } finally {
+      setIsCapturingScreen(false);
     }
   };
 
@@ -485,21 +541,45 @@ export default function ChatGPTInterface() {
     setIsRecording(!isRecording);
   };
 
+  // Load available screens when component mounts
+  useEffect(() => {
+    async function loadScreens() {
+      const screens = await getAvailableScreens();
+      setAvailableScreens(screens);
+      
+      if (screens.length > 0) {
+        setSelectedScreen(screens[0].id);
+      }
+    }
+    
+    // Carica gli schermi solo una volta all'avvio
+    loadScreens();
+  }, []);
+
+  // Render the screen selection dropdown
+  const renderScreenSelection = () => {
+    return (
+      <div className="flex items-center space-x-2">
+        <Button
+          variant="outline"
+          size="icon"
+          onClick={handleAnalyzeScreenshot}
+          disabled={!isSessionActive || isCapturingScreen}
+          title="Cattura e analizza schermo"
+        >
+          <Camera className="h-4 w-4" />
+          {isCapturingScreen && <span className="ml-2">Catturando...</span>}
+        </Button>
+      </div>
+    );
+  };
+
   return (
     <div className="flex flex-col h-screen bg-slate-950 text-slate-50">
       <header className="p-4 border-b border-slate-800 flex justify-between items-center">
         <h1 className="text-xl font-bold">Integrated ChatGPT</h1>
         <div className="flex items-center space-x-2">
-          <Select value={selectedScreen} onValueChange={setSelectedScreen}>
-            <SelectTrigger className="w-[100px]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="screen1">Screen 1</SelectItem>
-              <SelectItem value="screen2">Screen 2</SelectItem>
-              <SelectItem value="screen3">Screen 3</SelectItem>
-            </SelectContent>
-          </Select>
+          {renderScreenSelection()}
           <Button 
             variant={isSessionActive ? "destructive" : "default"}
             onClick={toggleSession}
@@ -551,15 +631,6 @@ export default function ChatGPTInterface() {
             title="Think"
           >
             <Brain size={16} />
-          </Button>
-          <Button 
-            variant="ghost" 
-            size="sm"
-            onClick={handleAnalyzeScreenshot}
-            disabled={!isSessionActive}
-            title="Analyze screen"
-          >
-            <Camera size={16} />
           </Button>
           <Button 
             variant="ghost" 
