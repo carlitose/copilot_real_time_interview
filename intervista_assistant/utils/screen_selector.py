@@ -12,65 +12,65 @@ from PyQt5.QtCore import Qt, QSize
 logger = logging.getLogger(__name__)
 
 class ScreenSelectorDialog(QDialog):
-    """Finestra di dialogo per selezionare uno schermo da catturare."""
+    """Dialog window to select a screen to capture."""
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Seleziona Schermo")
+        self.setWindowTitle("Select Screen")
         self.setMinimumWidth(600)
         self.setMinimumHeight(400)
         
-        # Inizializza mss per gli screenshot
+        # Initialize mss for screenshots
         self.sct = mss.mss()
         
-        # Ottieni l'elenco dei monitor
-        self.monitors = self.sct.monitors[1:]  # Escludiamo il monitor virtuale che è l'unione di tutti
+        # Get the list of monitors
+        self.monitors = self.sct.monitors[1:]  # Exclude the virtual monitor which is the union of all
         
-        # Valore selezionato (indice del monitor)
+        # Selected value (monitor index)
         self.selected_monitor_index = None
         
         self._setup_ui()
     
     def _setup_ui(self):
-        """Configura l'interfaccia utente."""
-        # Layout principale
+        """Set up the user interface."""
+        # Main layout
         main_layout = QVBoxLayout(self)
         
-        # Etichetta istruzioni
-        instructions = QLabel("Seleziona lo schermo di cui vuoi catturare lo screenshot:")
+        # Instructions label
+        instructions = QLabel("Select the screen you want to capture a screenshot of:")
         instructions.setWordWrap(True)
         main_layout.addWidget(instructions)
         
-        # Contenitore per i monitor
+        # Container for monitors
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_content = QWidget()
         scroll_layout = QVBoxLayout(scroll_content)
         
-        # Aggiungi opzione per schermo intero
-        full_screen_button = QPushButton("Schermo Intero (tutti i monitor)")
+        # Add option for full screen
+        full_screen_button = QPushButton("Full Screen (all monitors)")
         full_screen_button.clicked.connect(lambda: self._on_monitor_selected(None))
         scroll_layout.addWidget(full_screen_button)
         
-        # Aggiungi un separatore
+        # Add a separator
         separator = QFrame()
         separator.setFrameShape(QFrame.HLine)
         separator.setFrameShadow(QFrame.Sunken)
         scroll_layout.addWidget(separator)
         
-        # Aggiungi i pulsanti per ogni monitor
+        # Add buttons for each monitor
         for i, monitor in enumerate(self.monitors):
             monitor_frame = QFrame()
             monitor_frame.setFrameShape(QFrame.StyledPanel)
             monitor_layout = QHBoxLayout(monitor_frame)
             
-            # Info sul monitor
+            # Monitor info
             info_label = QLabel(f"Monitor {i+1}: {monitor['width']}x{monitor['height']} "
                               f"({monitor['left']},{monitor['top']})")
             monitor_layout.addWidget(info_label, 1)
             
-            # Pulsante per selezionare
-            select_button = QPushButton("Seleziona")
+            # Button to select
+            select_button = QPushButton("Select")
             select_button.clicked.connect(lambda checked, idx=i: self._on_monitor_selected(idx))
             monitor_layout.addWidget(select_button)
             
@@ -79,32 +79,32 @@ class ScreenSelectorDialog(QDialog):
         scroll_area.setWidget(scroll_content)
         main_layout.addWidget(scroll_area, 1)
         
-        # Pulsanti di azione
+        # Action buttons
         button_layout = QHBoxLayout()
-        cancel_button = QPushButton("Annulla")
+        cancel_button = QPushButton("Cancel")
         cancel_button.clicked.connect(self.reject)
         button_layout.addWidget(cancel_button)
         
         main_layout.addLayout(button_layout)
     
     def _on_monitor_selected(self, index):
-        """Gestisce la selezione di un monitor.
+        """Handles the selection of a monitor.
         
         Args:
-            index: Indice del monitor selezionato (None per schermo intero)
+            index: Index of the selected monitor (None for full screen)
         """
         self.selected_monitor_index = index
         self.accept()
     
     @staticmethod
     def get_selected_monitor(parent=None):
-        """Mostra la finestra di dialogo e restituisce l'indice del monitor selezionato.
+        """Displays the dialog and returns the index of the selected monitor.
         
         Args:
-            parent: Widget genitore
+            parent: Parent widget
             
         Returns:
-            int or None: Indice del monitor selezionato (None = schermo intero)
+            int or None: Index of the selected monitor (None = full screen)
         """
         dialog = ScreenSelectorDialog(parent)
         result = dialog.exec_()

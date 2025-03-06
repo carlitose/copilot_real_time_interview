@@ -81,13 +81,13 @@ export default function ChatGPTInterface() {
       console.log(`Adding new assistant message with text: ${update.text.substring(0, 50)}...`);
       
       // Find and remove any waiting message if this is a screenshot response
-      if (update.text.includes("screenshot") || update.text.includes("schermo")) {
+      if (update.text.includes("screenshot") || update.text.includes("screen")) {
         // Look for a temporary message about screenshot or screen
         const waitingMsgIndex = prevMessages.findIndex(m => 
           m.role === 'assistant' && 
-          (m.content.includes('Catturando') || 
+          (m.content.includes('Capturing') || 
            m.content.includes('Screenshot') || 
-           m.content.includes('analizzando lo schermo'))
+           m.content.includes('analyzing the screen'))
         );
         
         if (waitingMsgIndex !== -1) {
@@ -304,21 +304,21 @@ export default function ChatGPTInterface() {
         await apiClient.startSession(sid);
         setIsSessionActive(true);
         
-        // Avvia automaticamente la registrazione audio
-        console.log("Avvio automatico della registrazione audio...");
+        // Automatically start audio recording
+        console.log("Automatically starting audio recording...");
         
-        // Verifica che audioStreamControl sia inizializzato correttamente
+        // Ensure audioStreamControl is properly initialized
         if (audioStreamControl) {
           try {
             audioStreamControl.start();
-            console.log("Registrazione audio avviata con successo");
+            console.log("Audio recording started successfully");
             setIsRecording(true);
           } catch (error) {
-            console.error("Errore nell'avvio della registrazione audio:", error);
-            alert("C'è stato un problema nell'attivazione del microfono. Per favore, controlla i permessi del browser.");
+            console.error("Error starting audio recording:", error);
+            alert("There was a problem activating the microphone. Please check your browser permissions.");
           }
         } else {
-          console.error("audioStreamControl non inizializzato correttamente");
+          console.error("audioStreamControl not properly initialized");
         }
         
       } catch (error) {
@@ -412,7 +412,7 @@ export default function ChatGPTInterface() {
       // @ts-ignore - Adding temporary id for tracking this message
       setMessages(prev => [...prev, { 
         role: 'assistant', 
-        content: 'Catturando e analizzando lo schermo... (attendi alcuni secondi)',
+        content: 'Capturing and analyzing the screen... (please wait a few seconds)',
         id: messageId 
       }]);
       
@@ -424,7 +424,7 @@ export default function ChatGPTInterface() {
         setMessages(prev => prev.map(msg => 
           // @ts-ignore - Using temporary id for tracking
           msg.id === messageId ? 
-          { ...msg, content: 'Catturando e analizzando lo schermo... (immagine inviata al server)' } : 
+          { ...msg, content: 'Capturing and analyzing the screen... (image sent to server)' } : 
           msg
         ));
         
@@ -432,18 +432,18 @@ export default function ChatGPTInterface() {
         const success = await apiClient.sendScreenshot(sessionId, imageData);
         
         if (!success) {
-          throw new Error("Errore nell'invio dello screenshot al backend");
+          throw new Error("Error sending screenshot to backend");
         }
         
         // Let the user know we're waiting for analysis
         setMessages(prev => prev.map(msg => 
           // @ts-ignore - Using temporary id for tracking
           msg.id === messageId ? 
-          { ...msg, content: 'Screenshot inviato! In attesa dell\'analisi dal server...' } : 
+          { ...msg, content: 'Screenshot sent! Waiting for server analysis...' } : 
           msg
         ));
       } else {
-        throw new Error("Impossibile catturare lo screenshot");
+        throw new Error("Unable to capture screenshot");
       }
       
       // The response will be handled via SSE events
@@ -453,7 +453,7 @@ export default function ChatGPTInterface() {
       // Add an error message
       setMessages(prev => [
         ...prev,
-        { role: 'assistant', content: `Si è verificato un errore durante la cattura dello screenshot: ${error instanceof Error ? error.message : 'Errore sconosciuto'}` }
+        { role: 'assistant', content: `An error occurred while capturing the screenshot: ${error instanceof Error ? error.message : 'Unknown error'}` }
       ]);
     } finally {
       setIsCapturingScreen(false);
@@ -499,43 +499,43 @@ export default function ChatGPTInterface() {
     setMessages([]);
   };
 
-  // Inizializza l'audio control con l'hook useAudioStream
+  // Initialize audio control with the useAudioStream hook
   const audioStreamControl = useAudioStream(sessionId || '');
   
-  // Effect per monitorare cambiamenti di sessionId e aggiornare lo stato di registrazione
+  // Effect to monitor sessionId changes and update recording state
   useEffect(() => {
-    console.log(`sessionId aggiornato: ${sessionId}`);
-    // Se la sessione è attiva e isRecording è true, ma audioStreamControl non è attivo,
-    // prova a riavviare la registrazione
+    console.log(`sessionId updated: ${sessionId}`);
+    // If the session is active and isRecording is true, but audioStreamControl is not active,
+    // try to restart the recording
     if (isSessionActive && isRecording && audioStreamControl && !audioStreamControl.isActive) {
-      console.log('Tentativo di riattivazione della registrazione audio dopo cambio sessionId');
+      console.log('Attempting to reactivate audio recording after sessionId change');
       try {
         audioStreamControl.start();
       } catch (error) {
-        console.error('Errore nella riattivazione della registrazione audio:', error);
+        console.error('Error reactivating audio recording:', error);
       }
     }
   }, [sessionId, isSessionActive, isRecording, audioStreamControl]);
 
   const toggleRecording = () => {
     if (!isSessionActive || !sessionId) {
-      alert('Per favore, avvia prima una sessione.');
+      alert('Please start a session first.');
       return;
     }
     
-    // Usa direttamente l'audioStreamControl invece di crearlo condizionalmente
+    // Use audioStreamControl directly instead of creating it conditionally
     if (!isRecording) {
-      console.log('Attivazione microfono in corso...');
+      console.log('Activating microphone...');
       try {
         audioStreamControl.start();
       } catch (error) {
-        console.error('Errore nell\'attivazione del microfono:', error);
-        alert('C\'è stato un problema nell\'attivazione del microfono. Assicurati di aver dato i permessi necessari.');
+        console.error('Error activating microphone:', error);
+        alert('There was a problem activating the microphone. Make sure you have given the necessary permissions.');
         return;
       }
     } else {
       audioStreamControl.stop();
-      console.log('Microfono disattivato.');
+      console.log('Microphone deactivated.');
     }
     
     setIsRecording(!isRecording);
@@ -552,7 +552,7 @@ export default function ChatGPTInterface() {
       }
     }
     
-    // Carica gli schermi solo una volta all'avvio
+    // Load screens only once on startup
     loadScreens();
   }, []);
 
@@ -565,10 +565,10 @@ export default function ChatGPTInterface() {
           size="icon"
           onClick={handleAnalyzeScreenshot}
           disabled={!isSessionActive || isCapturingScreen}
-          title="Cattura e analizza schermo"
+          title="Capture and analyze screen"
         >
           <Camera className="h-4 w-4" />
-          {isCapturingScreen && <span className="ml-2">Catturando...</span>}
+          {isCapturingScreen && <span className="ml-2">Capturing...</span>}
         </Button>
       </div>
     );

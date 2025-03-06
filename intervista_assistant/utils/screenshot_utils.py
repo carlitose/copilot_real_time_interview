@@ -16,148 +16,147 @@ import pyperclip
 logger = logging.getLogger(__name__)
 
 class ScreenshotManager:
-    """Classe per gestire screenshot e condivisione."""
+    """Class to manage screenshots and sharing."""
     
     def __init__(self, base_dir=None):
-        """Inizializza il gestore di screenshot.
+        """Initialize the screenshot manager.
         
         Args:
-            base_dir: Directory di base per salvare gli screenshot
+            base_dir: Base directory to save screenshots
         """
         if base_dir:
             self.base_dir = Path(base_dir)
         else:
             self.base_dir = Path.cwd() / "screenshots"
             
-        # Crea la directory se non esiste
+        # Create the directory if it doesn't exist
         self.base_dir.mkdir(exist_ok=True)
         
-        # Inizializza mss per gli screenshot
+        # Initialize mss for screenshots
         self.sct = mss.mss()
     
     def get_monitors(self):
-        """Ottiene l'elenco dei monitor disponibili.
+        """Get the list of available monitors.
         
         Returns:
-            list: Lista dei monitor disponibili con le loro dimensioni
+            list: List of available monitors with their dimensions
         """
         try:
             monitors = self.sct.monitors
-            # Il primo elemento (index 0) è l'unione di tutti i monitor
-            # Ritorniamo i monitor individuali a partire da index 1
+            # The first element (index 0) is the union of all monitors
+            # Return individual monitors starting from index 1
             return monitors[1:]
         except Exception as e:
-            logger.error(f"Errore nel recupero dei monitor: {str(e)}")
+            logger.error(f"Error retrieving monitors: {str(e)}")
             return []
     
     def take_screenshot(self, delay=0.5, monitor_index=None):
-        """Cattura uno screenshot dello schermo selezionato o dello schermo intero.
+        """Capture a screenshot of the selected screen or the entire screen.
         
         Args:
-            delay: Ritardo in secondi prima di catturare lo screenshot
-            monitor_index: Indice del monitor da catturare (None = schermo intero)
+            delay: Delay in seconds before capturing the screenshot
+            monitor_index: Index of the monitor to capture (None = entire screen)
         
         Returns:
-            Path: Percorso del file screenshot salvato
+            Path: Path of the saved screenshot file
         """
         try:
-            # Attendi per il ritardo specificato
+            # Wait for the specified delay
             time.sleep(delay)
             
-            # Genera nome file con timestamp
+            # Generate filename with timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"screenshot_{timestamp}.png"
             filepath = self.base_dir / filename
             
-            # Cattura e salva lo screenshot
+            # Capture and save the screenshot
             if monitor_index is not None:
-                # Ottieni l'elenco dei monitor
+                # Get the list of monitors
                 monitors = self.get_monitors()
                 if 0 <= monitor_index < len(monitors):
-                    # Cattura lo screenshot del monitor specificato
+                    # Capture the screenshot of the specified monitor
                     monitor = monitors[monitor_index]
                     screenshot = self.sct.grab(monitor)
                     mss.tools.to_png(screenshot.rgb, screenshot.size, output=str(filepath))
                 else:
-                    logger.warning(f"Indice monitor non valido: {monitor_index}, utilizzo schermo intero")
+                    logger.warning(f"Invalid monitor index: {monitor_index}, using entire screen")
                     screenshot = pyautogui.screenshot()
                     screenshot.save(str(filepath))
             else:
-                # Cattura lo screenshot dello schermo intero
+                # Capture the screenshot of the entire screen
                 screenshot = pyautogui.screenshot()
                 screenshot.save(str(filepath))
             
-            logger.info(f"Screenshot salvato in: {filepath}")
+            logger.info(f"Screenshot saved at: {filepath}")
             return filepath
             
         except Exception as e:
-            logger.error(f"Errore durante la cattura dello screenshot: {str(e)}")
+            logger.error(f"Error capturing screenshot: {str(e)}")
             raise
     
     def upload_to_temp_service(self, filepath):
-        """Carica l'immagine su un servizio temporaneo.
+        """Upload the image to a temporary service.
         
         Args:
-            filepath: Percorso del file da caricare
+            filepath: Path of the file to upload
             
         Returns:
-            str: URL dell'immagine caricata
+            str: URL of the uploaded image
         """
         try:
-            # Per questo esempio, utilizziamo imgbb.com
-            # In un'applicazione reale, potrebbe essere necessario un account API
-            # o un servizio diverso
+            # For this example, we use imgbb.com
+            # In a real application, an API account or a different service might be needed
             
-            # Apri il file in modalità binaria
+            # Open the file in binary mode
             with open(filepath, "rb") as file:
-                # Prepara i dati per la richiesta
+                # Prepare the data for the request
                 files = {"image": (filepath.name, file, "image/png")}
                 
-                # Invia la richiesta al servizio
+                # Send the request to the service
                 response = requests.post(
                     "https://api.imgbb.com/1/upload",
                     files=files,
                     params={"key": os.getenv("IMGBB_API_KEY", "")}
                 )
                 
-                # Verifica la risposta
+                # Check the response
                 if response.status_code == 200:
                     data = response.json()
                     if data.get("success"):
                         url = data["data"]["url"]
-                        logger.info(f"Immagine caricata con successo: {url}")
+                        logger.info(f"Image successfully uploaded: {url}")
                         return url
                 
-                logger.error(f"Errore nel caricamento dell'immagine: {response.text}")
+                logger.error(f"Error uploading image: {response.text}")
                 return None
                 
         except Exception as e:
-            logger.error(f"Errore durante il caricamento dell'immagine: {str(e)}")
+            logger.error(f"Error during image upload: {str(e)}")
             return None
     
     def copy_to_clipboard(self, filepath):
-        """Copia l'immagine negli appunti.
+        """Copy the image to the clipboard.
         
         Args:
-            filepath: Percorso del file da copiare negli appunti
+            filepath: Path of the file to copy to the clipboard
             
         Returns:
-            bool: True se l'operazione è riuscita, False altrimenti
+            bool: True if the operation was successful, False otherwise
         """
         try:
-            # Apri l'immagine
+            # Open the image
             image = Image.open(filepath)
             
-            # Copia negli appunti
-            # Nota: questo funziona in modo diverso su diverse piattaforme
-            # Potrebbe richiedere implementazioni specifiche per sistema operativo
+            # Copy to clipboard
+            # Note: this works differently on different platforms
+            # It may require OS-specific implementations
             
-            # Su macOS, possiamo usare pyperclip per copiare il percorso del file
+            # On macOS, we can use pyperclip to copy the file path
             pyperclip.copy(str(filepath))
             
-            logger.info(f"Percorso immagine copiato negli appunti: {filepath}")
+            logger.info(f"Image path copied to clipboard: {filepath}")
             return True
             
         except Exception as e:
-            logger.error(f"Errore durante la copia negli appunti: {str(e)}")
-            return False 
+            logger.error(f"Error copying to clipboard: {str(e)}")
+            return False  
