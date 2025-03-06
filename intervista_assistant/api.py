@@ -463,7 +463,7 @@ class SessionManager:
             
             # API call
             response = client.chat.completions.create(
-                model="gpt-4-turbo",
+                model="gpt-4o",
                 messages=summary_messages,
                 max_tokens=2000
             )
@@ -493,7 +493,7 @@ class SessionManager:
             
             # API call
             response = client.chat.completions.create(
-                model="gpt-4-turbo",
+                model="gpt-4o",
                 messages=solution_messages,
                 max_tokens=4000
             )
