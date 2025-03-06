@@ -493,7 +493,7 @@ class SessionManager:
             
             # API call
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model="o3-mini",
                 messages=solution_messages,
                 max_tokens=4000
             )
