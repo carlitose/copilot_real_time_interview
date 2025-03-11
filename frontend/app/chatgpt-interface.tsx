@@ -1,5 +1,5 @@
 "use client"
-import { Play, Square, Trash2, Save, Brain, Camera, Bug, Mic, MicOff } from "lucide-react"
+import { Play, Square, Trash2, Save, Brain, Camera, Bug, Mic, MicOff, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -279,30 +279,52 @@ export default function ChatGPTInterface() {
       
       // End the session on the server
       if (sessionId) {
-        await apiClient.endSession(sessionId);
-        setIsSessionActive(false);
+        try {
+          await apiClient.endSession(sessionId);
+        } catch (error) {
+          console.error("Error ending session:", error);
+        } finally {
+          // Reset stream error state
+          setIsStreamError(false);
+          // Indicate session is inactive
+          setIsSessionActive(false);
+          // Keep the sessionId for history, but mark as ended
+          console.log(`Session ${sessionId} ended.`);
+          
+          // Aggiungere un messaggio di sistema che indica che la sessione è terminata
+          setMessages(prev => [
+            ...prev,
+            { 
+              role: 'system', 
+              content: '--- Sessione terminata ---' 
+            }
+          ]);
+        }
       }
     } else {
       // Start a new session
       console.log("Starting a new session...");
       
-      let sid = sessionId;
-      
-      if (!sid) {
-        // If there's no session, create a new one
-        try {
-          sid = await apiClient.createSession();
-          setSessionId(sid);
-        } catch (error) {
-          console.error("Error creating session:", error);
-          return;
-        }
-      }
-      
+      // Always create a new session when starting
       try {
-        // Start the session on the server
-        await apiClient.startSession(sid);
+        // Create a new session ID every time we start
+        const newSessionId = await apiClient.createSession();
+        console.log(`New session created: ${newSessionId}`);
+        setSessionId(newSessionId);
+        
+        // Start the new session on the server
+        await apiClient.startSession(newSessionId);
         setIsSessionActive(true);
+        setIsStreamError(false); // Reset any stream errors
+        
+        // Aggiungere un messaggio di sistema che indica l'inizio di una nuova sessione
+        setMessages(prev => [
+          ...prev,
+          { 
+            role: 'system', 
+            content: '--- Nuova sessione avviata ---' 
+          }
+        ]);
         
         // Automatically start audio recording
         console.log("Automatically starting audio recording...");
@@ -320,9 +342,9 @@ export default function ChatGPTInterface() {
         } else {
           console.error("audioStreamControl not properly initialized");
         }
-        
       } catch (error) {
-        console.error("Error starting session:", error);
+        console.error("Error starting new session:", error);
+        alert("Impossibile avviare una nuova sessione. Ricarica la pagina e riprova.");
       }
     }
   };
@@ -419,6 +441,69 @@ export default function ChatGPTInterface() {
       // Capture the screenshot from the browser
       const imageData = await captureScreenshot(selectedScreen);
       
+      // Verifica se la connessione è ancora attiva dopo la cattura dello screenshot
+      if (!isConnected && isSessionActive && sessionId) {
+        console.log("Connection lost after screenshot, attempting to reconnect...");
+        
+        // Chiudi qualsiasi EventSource esistente
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close();
+          eventSourceRef.current = null;
+        }
+        
+        // Ricrea l'EventSource
+        try {
+          const eventSourceUrl = `${API_BASE_URL}/sessions/stream?session_id=${sessionId}`;
+          console.log(`Reconnecting to SSE endpoint: ${eventSourceUrl}`);
+          
+          const eventSource = new EventSource(eventSourceUrl);
+          eventSourceRef.current = eventSource;
+          
+          // Setup message handler
+          eventSource.onmessage = (event) => {
+            try {
+              const data = JSON.parse(event.data);
+              if (data.type === 'response') {
+                handleResponse({
+                  type: 'response',
+                  text: data.text,
+                  session_id: data.session_id,
+                  final: data.final || true
+                });
+              } else if (data.type === 'transcription') {
+                handleTranscription({
+                  type: 'transcription',
+                  text: data.text,
+                  session_id: data.session_id
+                });
+              } else if (data.type === 'error') {
+                handleError({
+                  type: 'error',
+                  message: data.message,
+                  session_id: data.session_id
+                });
+              } else if (data.type === 'connection') {
+                handleConnectionStatus(data.connected);
+              }
+            } catch (error) {
+              console.error('Error parsing SSE data:', error);
+            }
+          };
+          
+          eventSource.onerror = (error) => {
+            console.error('EventSource error:', error);
+            handleConnectionError(error);
+          };
+          
+          eventSource.onopen = () => {
+            console.log('EventSource connection reopened');
+            handleConnectionStatus(true);
+          };
+        } catch (error) {
+          console.error('Error reconnecting to SSE stream:', error);
+        }
+      }
+      
       if (imageData) {
         // Show a preview of the captured screenshot (optional)
         setMessages(prev => prev.map(msg => 
@@ -499,6 +584,10 @@ export default function ChatGPTInterface() {
     setMessages([]);
   };
 
+  const handleDeleteMessage = (indexToDelete: number) => {
+    setMessages(prevMessages => prevMessages.filter((_, index) => index !== indexToDelete));
+  };
+
   // Initialize audio control with the useAudioStream hook
   const audioStreamControl = useAudioStream(sessionId || '');
   
@@ -556,73 +645,61 @@ export default function ChatGPTInterface() {
     loadScreens();
   }, []);
 
-  // Render the screen selection dropdown
-  const renderScreenSelection = () => {
-    return (
-      <div className="flex items-center space-x-2">
-        <Button
-          variant="outline"
-          size="icon"
-          onClick={handleAnalyzeScreenshot}
-          disabled={!isSessionActive || isCapturingScreen}
-          title="Capture and analyze screen"
-        >
-          <Camera className="h-4 w-4" />
-          {isCapturingScreen && <span className="ml-2">Capturing...</span>}
-        </Button>
-      </div>
-    );
-  };
-
   return (
     <div className="flex flex-col h-screen bg-slate-950 text-slate-50">
       <header className="p-4 border-b border-slate-800 flex justify-between items-center">
         <h1 className="text-xl font-bold">Integrated ChatGPT</h1>
-        <div className="flex items-center space-x-2">
-          {renderScreenSelection()}
-          <Button 
-            variant={isSessionActive ? "destructive" : "default"}
-            onClick={toggleSession}
-            title={isSessionActive ? "End session" : "Start session"}
-          >
-            {isSessionActive ? <Square size={16} /> : <Play size={16} />}
-          </Button>
-          <Button 
-            variant="ghost" 
-            onClick={handleClear}
-            title="Clear chat"
-          >
-            <Trash2 size={16} />
-          </Button>
-          <Button 
-            variant="ghost" 
-            onClick={handleSaveConversation}
-            title="Save conversation"
-            disabled={!isSessionActive}
-          >
-            <Save size={16} />
-          </Button>
-        </div>
       </header>
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.map((message, index) => (
           <div 
             key={index} 
-            className={`p-3 rounded-lg max-w-[80%] ${
+            className={`p-3 rounded-lg max-w-[80%] relative ${
               message.role === 'user' 
                 ? 'bg-blue-900 ml-auto' 
                 : message.role === 'assistant'
-                  ? 'bg-slate-800'
-                  : 'bg-slate-700 mx-auto'
+                  ? 'bg-slate-800 group'
+                  : message.role === 'log'
+                    ? 'bg-slate-600 border border-slate-500 italic'
+                    : 'bg-slate-700 mx-auto text-center text-sm font-semibold'
             }`}
           >
             <div dangerouslySetInnerHTML={{ __html: formatMarkdown(message.content) }} />
+            {message.role === 'assistant' && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="absolute -top-1 -right-1 h-5 w-5 p-0 rounded-full bg-slate-700 hover:bg-slate-600 opacity-0 group-hover:opacity-100 transition-opacity duration-200"
+                onClick={() => handleDeleteMessage(index)}
+                title="Delete message"
+              >
+                <X size={10} className="text-slate-300" />
+              </Button>
+            )}
           </div>
         ))}
         <div ref={messagesEndRef} />
       </div>
       <div className="p-4 border-t border-slate-800 bg-slate-900">
         <div className="flex items-center space-x-2 mb-2">
+          <Button 
+            variant="ghost"
+            size="sm"
+            onClick={toggleSession}
+            title={isSessionActive ? "End session" : "Start session"}
+          >
+            {isSessionActive ? <Square size={16} /> : <Play size={16} />}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleAnalyzeScreenshot}
+            disabled={!isSessionActive || isCapturingScreen}
+            title="Capture and analyze screen"
+          >
+            <Camera className="h-4 w-4" />
+            {isCapturingScreen && <span className="ml-2">Capturing...</span>}
+          </Button>
           <Button 
             variant="ghost" 
             size="sm"
@@ -635,10 +712,19 @@ export default function ChatGPTInterface() {
           <Button 
             variant="ghost" 
             size="sm"
+            onClick={handleSaveConversation}
+            title="Save conversation"
             disabled={!isSessionActive}
-            title="Debug"
           >
-            <Bug size={16} />
+            <Save size={16} />
+          </Button>
+          <Button 
+            variant="ghost" 
+            size="sm"
+            onClick={handleClear}
+            title="Clear chat"
+          >
+            <Trash2 size={16} />
           </Button>
           <div className="ml-auto text-xs text-slate-400">
             {isConnected ? 'Connected' : 'Disconnected'}

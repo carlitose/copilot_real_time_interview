@@ -35,7 +35,7 @@ export interface ConversationResponse extends ApiResponse {
 }
 
 export interface Message {
-  role: 'user' | 'assistant' | 'system';
+  role: 'user' | 'assistant' | 'system' | 'log';
   content: string;
 }
 

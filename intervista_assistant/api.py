@@ -346,7 +346,7 @@ class SessionManager:
             
             # Call OpenAI API for image analysis
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4o-mini",
                 messages=messages,
                 max_tokens=4000
             )
@@ -463,7 +463,7 @@ class SessionManager:
             
             # API call
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4o-mini",
                 messages=summary_messages,
                 max_tokens=2000
             )
