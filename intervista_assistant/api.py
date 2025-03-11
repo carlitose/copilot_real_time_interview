@@ -390,7 +390,8 @@ class SessionManager:
             
             # Also send a message through the real-time thread to maintain context
             if self.text_thread and self.text_thread.connected:
-                context_msg = "[I have analyzed the screenshot you sent me. If you have specific questions, feel free to ask!]"
+                # Send the complete screenshot analysis to the real-time model
+                context_msg = f"[SCREENSHOT ANALYSIS]: {assistant_response}"
                 self.text_thread.send_text(context_msg)
             
             logger.info("Image analysis completed successfully")
@@ -465,7 +466,8 @@ class SessionManager:
             
             # Also send a message through the real-time thread
             if self.text_thread and self.text_thread.connected:
-                context_msg = "[I have completed an in-depth analysis of our conversation, identified key issues, and generated detailed solutions. If you have specific questions, I am here to help!]"
+                # Send the complete analysis and solution to the real-time model
+                context_msg = f"[THINKING PROCESS RESULTS]:\n\nCONVERSATION ANALYSIS:\n{summary}\n\nDETAILED SOLUTION:\n{solution}"
                 self.text_thread.send_text(context_msg)
             
             logger.info("Thinking process completed successfully")
@@ -518,7 +520,6 @@ class SessionManager:
             response = client.chat.completions.create(
                 model="o3-mini",
                 messages=solution_messages,
-                max_tokens=4000
             )
             
             solution = response.choices[0].message.content
@@ -768,26 +769,6 @@ def send_text_message():
             "success": False,
             "error": "Failed to send message to the model"
         }), 400
-
-@app.route('/api/sessions/screenshot', methods=['POST'])
-@require_session
-def process_screenshot():
-    """Processes a screenshot sent from the frontend."""
-    session_id = request.json.get('session_id')
-    monitor_index = request.json.get('monitor_index')
-    
-    if monitor_index is None:
-        return jsonify({
-            "success": False,
-            "error": "No monitor index provided"
-        }), 400
-    
-    # TODO: Implement screenshot capture from backend
-    # This is a placeholder for now
-    return jsonify({
-        "success": False,
-        "error": "Backend screenshot capture not implemented"
-    }), 501
 
 @app.route('/api/sessions/analyze-screenshot', methods=['POST'])
 @require_session
