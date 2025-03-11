@@ -1,12 +1,12 @@
 /**
- * Modulo per la gestione degli stream di eventi dal server (SSE)
+ * Module for managing event streams from the server (SSE)
  */
 import { useEffect, useRef } from 'react';
 
-// URL di base per l'API
+// Base URL for the API
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/api';
 
-// Tipi di aggiornamento
+// Update types
 export interface TranscriptionUpdate {
   type: 'transcription';
   text: string;
@@ -32,10 +32,10 @@ export interface ConnectionUpdate {
   session_id: string;
 }
 
-// Tipo di aggiornamento generico
+// Generic update type
 export type Update = TranscriptionUpdate | ResponseUpdate | ErrorUpdate | ConnectionUpdate;
 
-// Callback per gli eventi
+// Call Event callbacks
 export interface StreamCallbacks {
   onTranscription?: (update: TranscriptionUpdate) => void;
   onResponse?: (update: ResponseUpdate) => void;
@@ -45,14 +45,14 @@ export interface StreamCallbacks {
 }
 
 /**
- * Gestisce la connessione SSE con il server
+ * Manages the SSE connection with the server
  */
 export interface StreamControl {
   cleanup: () => void;
 }
 
 /**
- * Classe che gestisce la connessione EventSource
+ * Class that manages the EventSource connection
  */
 class EventStreamManager {
   private eventSource: EventSource | null = null;
@@ -65,27 +65,27 @@ class EventStreamManager {
   }
 
   /**
-   * Inizia a gestire gli eventi
+   * Starts managing events
    */
   connect(): void {
     if (!this.sessionId) return;
     
-    // Chiudi eventuali fonti di eventi esistenti
+    // Close any existing event sources
     this.disconnect();
 
     console.log(`[EventStream] Connecting to SSE endpoint for session ${this.sessionId}`);
     
-    // Crea un nuovo EventSource per gli eventi SSE
+    // Create a new EventSource for SSE events
     this.eventSource = new EventSource(`${API_BASE_URL}/sessions/stream?session_id=${this.sessionId}`);
     
-    // Gestore generico per i messaggi
+    // Generic handler for messages
     this.eventSource.onmessage = (event) => {
       console.log(`[EventStream] Raw event received: ${event.data}`);
       
       try {
         const data = JSON.parse(event.data);
         
-        // Verifichiamo che ci sia un tipo definito
+        // Check that there is a defined type
         if (!data || typeof data !== 'object' || !('type' in data)) {
           console.warn('[EventStream] Received data without type property:', data);
           return;
@@ -93,7 +93,7 @@ class EventStreamManager {
         
         console.log(`[EventStream] Parsed event type: ${data.type}`);
         
-        // Distribuisci i messaggi in base al tipo
+        // Distribute messages based on type
         switch (data.type) {
           case 'transcription':
             console.log(`[EventStream] Transcription received: ${(data as TranscriptionUpdate).text.substring(0, 30)}...`);
@@ -115,12 +115,12 @@ class EventStreamManager {
             console.log(`[EventStream] Unknown event type: ${data.type}`);
         }
       } catch (error) {
-        console.error('[EventStream] Errore nel parsing del messaggio SSE:', error);
+        console.error('[EventStream] Error parsing SSE message:', error);
         console.error('[EventStream] Raw message data:', event.data);
       }
     };
     
-    // Gestione degli errori
+    // Error handling
     this.eventSource.onerror = (error) => {
       console.error('[EventStream] SSE connection error:', error);
       if (this.callbacks.onConnectionError) {
@@ -128,14 +128,14 @@ class EventStreamManager {
       }
     };
     
-    // Gestione della connessione aperta
+    // Handling the open connection
     this.eventSource.onopen = () => {
       console.log('[EventStream] SSE connection opened');
     };
   }
 
   /**
-   * Chiude la connessione EventSource
+   * Closes the EventSource connection
    */
   disconnect(): void {
     if (this.eventSource) {
@@ -146,33 +146,33 @@ class EventStreamManager {
 }
 
 /**
- * Hook per gestire lo stream di eventi dal server
- * @param sessionId ID della sessione
- * @param callbacks Callback per vari tipi di eventi
- * @returns Controlli per lo stream di eventi
+ * Hook to manage the event stream from the server
+ * @param sessionId Session ID
+ * @param callbacks Callbacks for various event types
+ * @returns Controls for the event stream
  */
 export function useSessionStream(sessionId: string, callbacks: StreamCallbacks): StreamControl {
-  // Creiamo un ref per mantenere il manager tra i rendering
+  // Create a ref to keep the manager between renders
   const managerRef = useRef<EventStreamManager | null>(null);
   
-  // Utilizziamo useEffect per gestire il ciclo di vita della connessione
+  // Use useEffect to manage the connection lifecycle
   useEffect(() => {
-    // Verifichiamo che sia presente un ID sessione valido
+    // Check that there is a valid session ID
     if (!sessionId) {
       return;
     }
     
     console.log(`[EventStream] Initializing connection for session ${sessionId}`);
     
-    // Creiamo una nuova istanza del manager
+    // Create a new instance of the manager
     const manager = new EventStreamManager(sessionId, callbacks);
     managerRef.current = manager;
     
-    // Avviamo la connessione
+    // Start the connection
     manager.connect();
     
-    // Funzione di pulizia che viene eseguita quando il componente viene smontato
-    // o quando le dipendenze cambiano
+    // Cleanup function that runs when the component unmounts
+    // or when dependencies change
     return () => {
       console.log(`[EventStream] Cleaning up connection for session ${sessionId}`);
       if (managerRef.current) {
@@ -180,9 +180,9 @@ export function useSessionStream(sessionId: string, callbacks: StreamCallbacks):
         managerRef.current = null;
       }
     };
-  }, [sessionId, callbacks]); // Dipendenze dell'effetto
+  }, [sessionId, callbacks]); // Effect dependencies
   
-  // Restituiamo un oggetto con i controlli per lo stream
+  // Return an object with controls for the stream
   return {
     cleanup: () => {
       console.log(`[EventStream] Manual cleanup for session ${sessionId}`);

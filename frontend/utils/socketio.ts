@@ -26,7 +26,7 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
   const [isActive, setIsActive] = useState(false);
   const sessionIdRef = useRef<string>(sessionId);
   
-  // Aggiungiamo un ref per tracciare lo stato attivo indipendentemente dallo stato React
+  // Add a ref to track the active state independently from React state
   const isActiveRef = useRef<boolean>(false);
   
   // Update the sessionId reference when it changes
@@ -47,7 +47,7 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
       socketRef.current.on('disconnect', () => {
         console.log('[SOCKET.IO] Disconnected');
         setIsActive(false);
-        isActiveRef.current = false; // Aggiorniamo anche il ref
+        isActiveRef.current = false; // Update the ref as well
       });
 
       socketRef.current.on('error', (error: any) => {
@@ -93,11 +93,11 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
       console.log(`[AUDIO] Starting audio recording for session ${sessionIdRef.current}`);
       console.log(`[SOCKET.IO] Connection status: ${socketRef.current.connected ? 'Connected' : 'Disconnected'}`);
       
-      // Impostiamo subito isActive a true all'inizio, prima di qualsiasi altra operazione
-      // Aggiorniamo sia lo stato React che il ref
+      // Set isActive to true at the beginning, before any other operation
+      // Update both React state and the ref
       setIsActive(true);
       isActiveRef.current = true;
-      console.log(`[AUDIO] isActive flag impostato a true prima di iniziare la registrazione`);
+      console.log(`[AUDIO] isActive flag set to true before starting recording`);
       
       // TEST MODE: Send test data every second to verify the connection
       const TEST_MODE = false;
@@ -107,7 +107,7 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
         
         // Send test data every second
         const testInterval = setInterval(() => {
-          // Usiamo il ref invece dello stato
+          // Use the ref instead of the state
           if (!socketRef.current || !socketRef.current.connected || !isActiveRef.current) {
             console.log('[AUDIO TEST] Stopping test interval');
             clearInterval(testInterval);
@@ -136,19 +136,19 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
         // Save interval to clear it when recording stops
         (window as any).testAudioInterval = testInterval;
         
-        // Rimuoviamo questa impostazione di isActive poiché l'abbiamo già impostato all'inizio
+        // Remove this isActive setting as we already set it at the beginning
         // setIsActive(true);
         return;
       }
       
-      // Check microphone permission - versione migliorata
+      // Check microphone permission - improved version
       try {
-        console.log('[AUDIO] Richiedendo esplicitamente i permessi del microfono...');
+        console.log('[AUDIO] Explicitly requesting microphone permissions...');
         
-        // Messaggio più chiaro per l'utente
-        console.log('[AUDIO] Verifico accesso al microfono...');
+        // Clearer message for the user
+        console.log('[AUDIO] Checking microphone access...');
         
-        // Primo tentativo di richiesta del microfono con opzioni esplicite
+        // First attempt to request the microphone with explicit options
         const stream = await navigator.mediaDevices.getUserMedia({ 
           audio: {
             echoCancellation: true,
@@ -156,38 +156,38 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
             autoGainControl: true
           } 
         });
-        console.log('[AUDIO] Permesso del microfono concesso!', stream.getAudioTracks());
+        console.log('[AUDIO] Microphone permission granted!', stream.getAudioTracks());
         
-        // Verifica che lo stream abbia tracce audio attive
+        // Verify that the stream has active audio tracks
         const audioTracks = stream.getAudioTracks();
         if (audioTracks.length === 0) {
-          console.error('[AUDIO] Nessuna traccia audio disponibile dopo aver ottenuto i permessi');
-          throw new Error('Nessuna traccia audio disponibile');
+          console.error('[AUDIO] No audio tracks available after obtaining permissions');
+          throw new Error('No audio tracks available');
         }
         
-        console.log('[AUDIO] Tracce audio disponibili:', audioTracks.map(track => ({
+        console.log('[AUDIO] Available audio tracks:', audioTracks.map(track => ({
           label: track.label,
           enabled: track.enabled,
           muted: track.muted,
           readyState: track.readyState
         })));
         
-        // Non chiudiamo lo stream ma lo riusiamo invece di crearne uno nuovo
+        // Do not close the stream but reuse it instead of creating a new one
         mediaStreamRef.current = stream;
-        console.log('[AUDIO] Stream del microfono attivato correttamente');
+        console.log('[AUDIO] Microphone stream activated successfully');
         
       } catch (err) {
-        console.error('[AUDIO] Errore nel tentativo di ottenere i permessi del microfono:', err);
-        alert('Per favore, concedi i permessi del microfono per continuare con la registrazione audio.');
-        throw new Error('Permesso del microfono negato o dispositivo non disponibile');
+        console.error('[AUDIO] Error attempting to obtain microphone permissions:', err);
+        alert('Please grant microphone permissions to continue with audio recording.');
+        throw new Error('Microphone permission denied or device not available');
       }
       
-      // Non richiediamo un nuovo stream poiché abbiamo già quello ottenuto precedentemente
-      // mediaStreamRef.current è già stato impostato
+      // Do not request a new stream as we already have the one obtained previously
+      // mediaStreamRef.current is already set
       
       // Set up AudioContext
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({
-        sampleRate: 24000  // Imposta a 24kHz come richiesto da OpenAI
+        sampleRate: 24000  // Set to 24kHz as required by OpenAI
       });
       
       // Make sure audioContext is running
@@ -197,16 +197,16 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
         console.log(`AudioContext now in state: ${audioContext.state}`);
       }
       
-      console.log(`[AUDIO] AudioContext configurato con sampling rate: ${audioContext.sampleRate}Hz`);
+      console.log(`[AUDIO] AudioContext configured with sampling rate: ${audioContext.sampleRate}Hz`);
       
       const source = audioContext.createMediaStreamSource(mediaStreamRef.current);
       
-      // Create a processor node to sample audio - aumentiamo il buffer size per avere più dati
-      processorRef.current = audioContext.createScriptProcessor(8192, 1, 1);  // Da 4096 a 8192 per avere chunk di dati più grandi
+      // Create a processor node to sample audio - increase buffer size for more data
+      processorRef.current = audioContext.createScriptProcessor(8192, 1, 1);  // From 4096 to 8192 for larger data chunks
       
-      // Buffer per accumulare dati audio
+      // Buffer to accumulate audio data
       let audioAccumulatorRef: Int16Array[] = [];
-      const minimumAudioLength = 4800; // 200ms di audio a 24kHz (24000 * 0.2)
+      const minimumAudioLength = 1200; // 500ms of audio at 24kHz (24000 * 0.5)
       
       // Callback called when new audio data arrives
       processorRef.current.onaudioprocess = (e: AudioProcessingEvent) => {
@@ -217,7 +217,7 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
           lastProcessTimestampRef.current = now;
         }
         
-        // Usiamo il ref invece dello stato
+        // Use the ref instead of the state
         if (!socketRef.current || !isActiveRef.current) {
           console.log(`Audio processor active but conditions not met: socketRef.current=${!!socketRef.current}, isActiveRef.current=${isActiveRef.current}`);
           return;
@@ -258,20 +258,20 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
             return;
           }
           
-          // Aggiungiamo al buffer di accumulo
+          // Add to the accumulation buffer
           audioAccumulatorRef.push(scaledData);
           
-          // Calcoliamo il totale di campioni accumulati
+          // Calculate the total accumulated samples
           const totalSamples = audioAccumulatorRef.reduce((sum, array) => sum + array.length, 0);
           
-          // Verifichiamo se abbiamo abbastanza dati audio (almeno 200ms)
+          // Verify if we have enough audio data (at least 200ms)
           if (totalSamples < minimumAudioLength) {
-            console.log(`[AUDIO DEBUG] Accumulato ${totalSamples}/${minimumAudioLength} campioni, continuo ad accumulare...`);
+            console.log(`[AUDIO DEBUG] Accumulated ${totalSamples}/${minimumAudioLength} samples, continuing to accumulate...`);
             return;
           }
           
-          // Ora abbiamo abbastanza dati, possiamo inviarli
-          // Unifichiamo tutti i frammenti in un unico array
+          // Now we have enough data, we can send it
+          // Merge all fragments into a single array
           const mergedArray = new Int16Array(totalSamples);
           let offset = 0;
           
@@ -280,7 +280,7 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
             offset += array.length;
           }
           
-          // Verifica finale che ci siano abbastanza dati
+          // Final verification that there is enough data
           if (mergedArray.length < minimumAudioLength) {
             console.log(`[AUDIO WARNING] Merged buffer too small (${mergedArray.length}/${minimumAudioLength}), skipping`);
             return;
@@ -289,9 +289,9 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
           // Convert data to a standard JavaScript array for sending
           const audioData = Array.from(mergedArray);
           
-          // Calcoliamo la durata in ms
+          // Calculate the duration in ms
           const audioDurationMs = (audioData.length / audioContext.sampleRate) * 1000;
-          console.log(`[AUDIO DEBUG] Invio ${audioData.length} campioni (${audioDurationMs.toFixed(2)}ms di audio a ${audioContext.sampleRate}Hz)`);
+          console.log(`[AUDIO DEBUG] Sending ${audioData.length} samples (${audioDurationMs.toFixed(2)}ms of audio at ${audioContext.sampleRate}Hz)`);
           
           // Send audio data to server
           const avgAmplitude = audioData.reduce((sum, val) => sum + Math.abs(val), 0) / audioData.length;
@@ -305,9 +305,9 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
           }
           
           // Direct sending and verification
-          console.log(`[AUDIO DEBUG] Invio audio data al server con evento 'audio_data', sessionId=${sessionIdRef.current}`);
-          // Stampa i primi 10 valori per debug
-          console.log(`[AUDIO DEBUG] Primi 10 valori: [${audioData.slice(0, 10).join(', ')}]`);
+          console.log(`[AUDIO DEBUG] Sending audio data to server with event 'audio_data', sessionId=${sessionIdRef.current}`);
+          // Print the first 10 values for debug
+          console.log(`[AUDIO DEBUG] First 10 values: [${audioData.slice(0, 10).join(', ')}]`);
           
           socketRef.current.emit('audio_data', sessionIdRef.current, audioData, (acknowledgement: any) => {
             if (acknowledgement && acknowledgement.received) {
@@ -322,7 +322,7 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
             }
           });
           
-          // Reset buffer accumulatore
+          // Reset accumulation buffer
           audioAccumulatorRef = [];
           
           // Add a timeout to check if the server responds
@@ -369,7 +369,7 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
         console.log('[AUDIO TEST] Test interval cleared');
       }
       
-      // Aggiorniamo sia lo stato React che il ref
+      // Update both React state and the ref
       setIsActive(false);
       isActiveRef.current = false;
       console.log('Audio recording stopped');
