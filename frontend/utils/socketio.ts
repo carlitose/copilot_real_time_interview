@@ -206,7 +206,7 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
       
       // Buffer to accumulate audio data
       let audioAccumulatorRef: Int16Array[] = [];
-      const minimumAudioLength = 1200; // 500ms of audio at 24kHz (24000 * 0.5)
+      const minimumAudioLength = 12000; // 500ms of audio at 24kHz (24000 * 0.5)
       
       // Callback called when new audio data arrives
       processorRef.current.onaudioprocess = (e: AudioProcessingEvent) => {
