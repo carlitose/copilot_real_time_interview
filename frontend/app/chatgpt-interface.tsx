@@ -77,22 +77,23 @@ export default function ChatGPTInterface() {
         return newMessages;
       }
       
-      // For screenshot analysis or final responses, add a new message
-      console.log(`Adding new assistant message with text: ${update.text.substring(0, 50)}...`);
-      
       // Find and remove any waiting message if this is a screenshot response
       if (update.text.includes("screenshot") || update.text.includes("screen")) {
         // Look for a temporary message about screenshot or screen
         const waitingMsgIndex = prevMessages.findIndex(m => 
-          m.role === 'assistant' && 
+          (m.role === 'log' || m.role === 'assistant') && 
           (m.content.includes('Capturing') || 
            m.content.includes('Screenshot') || 
-           m.content.includes('analyzing the screen'))
+           m.content.includes('screen') ||
+           m.content.includes('analyzing'))
         );
         
         if (waitingMsgIndex !== -1) {
           console.log(`Found waiting message at index: ${waitingMsgIndex}, replacing it`);
           const newMessages = [...prevMessages];
+          
+          // Non abbiamo più bisogno di questa logica poiché i messaggi 
+          // di log sono ora gestiti separatamente
           newMessages[waitingMsgIndex] = {
             role: 'assistant',
             content: update.text
@@ -101,6 +102,8 @@ export default function ChatGPTInterface() {
         }
       }
       
+      // Non abbiamo più bisogno di questa logica poiché i messaggi 
+      // di log sono ora gestiti separatamente
       return [...prevMessages, {
         role: 'assistant',
         content: update.text
@@ -177,6 +180,27 @@ export default function ChatGPTInterface() {
               });
             } else if (data.type === 'connection') {
               handleConnectionStatus(data.connected);
+            } else if (data.type === 'log') {
+              // Gestione dei messaggi di log dal backend
+              setMessages(prev => {
+                // Cerca un messaggio di log esistente e simile
+                const logIndex = prev.findIndex(m => 
+                  m.role === 'log' && 
+                  (m.content.includes('Analyzing') || 
+                   m.content.includes('Capturing') || 
+                   m.content.includes('Screenshot'))
+                );
+                
+                if (logIndex !== -1) {
+                  // Aggiorna il messaggio di log esistente
+                  const newMessages = [...prev];
+                  newMessages[logIndex] = { role: 'log', content: data.text };
+                  return newMessages;
+                } else {
+                  // Aggiungi un nuovo messaggio di log
+                  return [...prev, { role: 'log', content: data.text }];
+                }
+              });
             } else if (data.type === 'heartbeat') {
               console.log(`[DEBUG] Heartbeat received: ${data.timestamp}`);
             }
@@ -296,7 +320,7 @@ export default function ChatGPTInterface() {
             ...prev,
             { 
               role: 'system', 
-              content: '--- Sessione terminata ---' 
+              content: '--- Session ended ---' 
             }
           ]);
         }
@@ -322,7 +346,7 @@ export default function ChatGPTInterface() {
           ...prev,
           { 
             role: 'system', 
-            content: '--- Nuova sessione avviata ---' 
+            content: '--- New session started ---' 
           }
         ]);
         
@@ -357,7 +381,7 @@ export default function ChatGPTInterface() {
       setMessages(prev => [...prev, { role: 'user', content: inputMessage }]);
       
       // Add a waiting message from the assistant
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Processing your request...' }]);
+      setMessages(prev => [...prev, { role: 'log', content: 'Processing your request...' }]);
       
       // Clear the input
       setInputMessage("");
@@ -372,7 +396,7 @@ export default function ChatGPTInterface() {
         // Add an error message
         setMessages(prev => [
           ...prev,
-          { role: 'assistant', content: 'An error occurred while sending the message.' }
+          { role: 'log', content: 'An error occurred while sending the message.' }
         ]);
       }
       
@@ -386,7 +410,7 @@ export default function ChatGPTInterface() {
       // Add an error message
       setMessages(prev => [
         ...prev,
-        { role: 'assistant', content: 'An error occurred while sending the message.' }
+        { role: 'log', content: 'An error occurred while sending the message.' }
       ]);
     }
   };
@@ -403,7 +427,7 @@ export default function ChatGPTInterface() {
     
     try {
       // Add a waiting message
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Thinking about this conversation...' }]);
+      setMessages(prev => [...prev, { role: 'log', content: 'Thinking about this conversation...' }]);
       
       // Start the thinking process
       await apiClient.startThinkProcess(sessionId);
@@ -418,7 +442,7 @@ export default function ChatGPTInterface() {
       // Add an error message
       setMessages(prev => [
         ...prev,
-        { role: 'assistant', content: 'An error occurred during the thinking process.' }
+        { role: 'log', content: 'An error occurred during the thinking process.' }
       ]);
     }
   };
@@ -433,7 +457,7 @@ export default function ChatGPTInterface() {
       const messageId = `screenshot-${Date.now()}`;
       // @ts-ignore - Adding temporary id for tracking this message
       setMessages(prev => [...prev, { 
-        role: 'assistant', 
+        role: 'log', 
         content: 'Capturing and analyzing the screen... (please wait a few seconds)',
         id: messageId 
       }]);
@@ -484,6 +508,27 @@ export default function ChatGPTInterface() {
                 });
               } else if (data.type === 'connection') {
                 handleConnectionStatus(data.connected);
+              } else if (data.type === 'log') {
+                // Gestione dei messaggi di log dal backend
+                setMessages(prev => {
+                  // Cerca un messaggio di log esistente e simile
+                  const logIndex = prev.findIndex(m => 
+                    m.role === 'log' && 
+                    (m.content.includes('Analyzing') || 
+                     m.content.includes('Capturing') || 
+                     m.content.includes('Screenshot'))
+                  );
+                  
+                  if (logIndex !== -1) {
+                    // Aggiorna il messaggio di log esistente
+                    const newMessages = [...prev];
+                    newMessages[logIndex] = { role: 'log', content: data.text };
+                    return newMessages;
+                  } else {
+                    // Aggiungi un nuovo messaggio di log
+                    return [...prev, { role: 'log', content: data.text }];
+                  }
+                });
               }
             } catch (error) {
               console.error('Error parsing SSE data:', error);
@@ -538,7 +583,7 @@ export default function ChatGPTInterface() {
       // Add an error message
       setMessages(prev => [
         ...prev,
-        { role: 'assistant', content: `An error occurred while capturing the screenshot: ${error instanceof Error ? error.message : 'Unknown error'}` }
+        { role: 'log', content: `An error occurred while capturing the screenshot: ${error instanceof Error ? error.message : 'Unknown error'}` }
       ]);
     } finally {
       setIsCapturingScreen(false);

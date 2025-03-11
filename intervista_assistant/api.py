@@ -74,6 +74,7 @@ class SessionManager:
         self.response_updates = []
         self.error_updates = []
         self.connection_updates = []
+        self.log_updates = []
     
     def start_session(self):
         """
@@ -237,6 +238,21 @@ class SessionManager:
         })
         logger.info(f"Connection status for session {self.session_id}: {'connected' if connected else 'disconnected'}")
     
+    def handle_log(self, text):
+        """Handles log updates that should not be saved in chat history."""
+        self.last_activity = datetime.now()
+        if not text:
+            return
+            
+        # Add the update to the queue
+        timestamp = datetime.now().isoformat()
+        self.log_updates.append({
+            "timestamp": timestamp,
+            "text": text
+        })
+        
+        logger.info(f"Log: {text[:50]}...")
+    
     def get_updates(self, update_type=None):
         """
         Gets all updates of the specified type.
@@ -250,6 +266,8 @@ class SessionManager:
             return self.error_updates
         elif update_type == "connection":
             return self.connection_updates
+        elif update_type == "log":
+            return self.log_updates
         elif update_type is None:
             # If no type is specified, return all updates as a flat list
             all_updates = []
@@ -272,6 +290,11 @@ class SessionManager:
             for update in self.connection_updates:
                 update_copy = update.copy()
                 update_copy["type"] = "connection"
+                all_updates.append(update_copy)
+                
+            for update in self.log_updates:
+                update_copy = update.copy()
+                update_copy["type"] = "log"
                 all_updates.append(update_copy)
                 
             # Sort updates by timestamp
@@ -342,7 +365,7 @@ class SessionManager:
         """Performs image analysis asynchronously."""
         try:
             # Send a processing notification
-            self.handle_response("Analyzing the screenshot...", final=False)
+            self.handle_log("Analyzing the screenshot...")
             
             # Call OpenAI API for image analysis
             response = client.chat.completions.create(
@@ -791,7 +814,7 @@ def analyze_screenshot():
         logger.info(f"Processing screenshot for session {session_id} (size: {len(image_data) // 1024}KB)")
         
         # Add immediate feedback through the SSE channel
-        session.handle_response("Screenshot received. Analyzing the image...", final=False)
+        session.handle_log("Screenshot received. Analyzing the image...")
         
         success, error = session.process_screenshot(image_data)
         
