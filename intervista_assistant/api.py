@@ -75,6 +75,11 @@ class SessionManager:
         self.error_updates = []
         self.connection_updates = []
         self.log_updates = []
+        
+        # Variables for managing duplicate or frequent responses
+        self.last_response_time = None
+        self.min_response_interval = 3  # Minimum seconds between responses
+        self.last_response_content = ""
     
     def start_session(self):
         """
@@ -196,24 +201,30 @@ class SessionManager:
         self.last_activity = datetime.now()
         if not text:
             return
+        
+        # Apply the filter to avoid too frequent or repetitive responses
+        filtered_text = self._filter_response(text)
+        if not filtered_text:
+            logger.info(f"Response filtered out (too frequent or similar to previous): {text[:30]}...")
+            return
             
         # Update chat history
         if (not self.chat_history or self.chat_history[-1]["role"] != "assistant"):
-            self.chat_history.append({"role": "assistant", "content": text})
+            self.chat_history.append({"role": "assistant", "content": filtered_text})
         elif self.chat_history and self.chat_history[-1]["role"] == "assistant":
             current_time = datetime.now().strftime("%H:%M:%S")
             previous_content = self.chat_history[-1]["content"]
-            self.chat_history[-1]["content"] = f"{previous_content}\n--- Response at {current_time} ---\n{text}"
+            self.chat_history[-1]["content"] = f"{previous_content}\n--- Response at {current_time} ---\n{filtered_text}"
         
         # Add the update to the queue
         timestamp = datetime.now().isoformat()
         self.response_updates.append({
             "timestamp": timestamp,
-            "text": text,
+            "text": filtered_text,
             "final": final
         })
         
-        logger.info(f"Response: {text[:50]}...")
+        logger.info(f"Response: {filtered_text[:50]}...")
     
     def handle_error(self, message):
         """Handles error updates."""
@@ -483,14 +494,14 @@ class SessionManager:
             summary_messages = messages.copy()
             summary_messages.append({
                 "role": "user",
-                "content": "Analyze our conversation and create a detailed summary that includes: 1) The context of the interview 2) The main challenges/questions discussed 3) The key points of my answers 4) Areas for improvement. Be specific and detailed."
+                "content": "Analyze our conversation and create a BRIEF summary that includes: 1) The context of the interview 2) The main challenges/questions discussed 3) The key points of my answers 4) Areas for improvement. Be concise and focused."
             })
             
             # API call
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=summary_messages,
-                max_tokens=2000
+                max_tokens=1000
             )
             
             summary = response.choices[0].message.content
@@ -508,11 +519,11 @@ class SessionManager:
             solution_messages = [
                 {
                     "role": "system",
-                    "content": "You are an expert job interview coach with extensive experience in technical and behavioral interviews. Your task is to provide detailed feedback and personalized solutions."
+                    "content": "You are an expert job interview coach with extensive experience in technical and behavioral interviews. Your task is to provide focused, concise feedback and solutions."
                 },
                 {
                     "role": "user",
-                    "content": f"Here is a summary of my interview:\n\n{summary}\n\nBased on this summary, provide me with a detailed solution that includes: 1) Specific feedback on my answers 2) Alternative or better solutions for the discussed challenges 3) Scripts or phrases I could have used 4) Practical advice to improve in weak areas 5) Strategies for follow-up after the interview. Be specific, practical, and detailed."
+                    "content": f"Here is a summary of my interview:\n\n{summary}\n\nBased on this summary, provide me with a CONCISE solution that includes: 1) Brief feedback on my answers 2) Alternative solutions for key challenges 3) 1-2 practical tips to improve. Focus only on the most important points."
                 }
             ]
             
@@ -520,6 +531,7 @@ class SessionManager:
             response = client.chat.completions.create(
                 model="o3-mini",
                 messages=solution_messages,
+                max_tokens=800
             )
             
             solution = response.choices[0].message.content
@@ -573,6 +585,19 @@ class SessionManager:
             "last_activity": self.last_activity.isoformat(),
             "message_count": len(self.chat_history)
         }
+    
+    def _filter_response(self, text):
+        """
+        Disabled filter function to allow all messages.
+        Always returns the original text without filtering.
+        """
+        # Still update timestamps to maintain tracking functionality
+        current_time = datetime.now()
+        self.last_response_time = current_time
+        self.last_response_content = text
+        
+        # Always return the original text
+        return text
 
 # Decorator to check if the session exists
 def require_session(f):

@@ -54,6 +54,8 @@ export default function ChatGPTInterface() {
     console.log(`Received response from server: ${update.text}`);
     console.log(`Is final response: ${update.final ? 'yes' : 'no'}`);
     
+    // We no longer filter messages based on text - we show everything
+    
     setMessages(prevMessages => {
       console.log(`Current messages count: ${prevMessages.length}`);
       
@@ -92,8 +94,6 @@ export default function ChatGPTInterface() {
           console.log(`Found waiting message at index: ${waitingMsgIndex}, replacing it`);
           const newMessages = [...prevMessages];
           
-          // Non abbiamo più bisogno di questa logica poiché i messaggi 
-          // di log sono ora gestiti separatamente
           newMessages[waitingMsgIndex] = {
             role: 'assistant',
             content: update.text
@@ -102,8 +102,6 @@ export default function ChatGPTInterface() {
         }
       }
       
-      // Non abbiamo più bisogno di questa logica poiché i messaggi 
-      // di log sono ora gestiti separatamente
       return [...prevMessages, {
         role: 'assistant',
         content: update.text
@@ -181,9 +179,9 @@ export default function ChatGPTInterface() {
             } else if (data.type === 'connection') {
               handleConnectionStatus(data.connected);
             } else if (data.type === 'log') {
-              // Gestione dei messaggi di log dal backend
+              // Handling log messages from the backend
               setMessages(prev => {
-                // Cerca un messaggio di log esistente e simile
+                // Look for an existing and similar log message
                 const logIndex = prev.findIndex(m => 
                   m.role === 'log' && 
                   (m.content.includes('Analyzing') || 
@@ -192,12 +190,12 @@ export default function ChatGPTInterface() {
                 );
                 
                 if (logIndex !== -1) {
-                  // Aggiorna il messaggio di log esistente
+                  // Update the existing log message
                   const newMessages = [...prev];
                   newMessages[logIndex] = { role: 'log', content: data.text };
                   return newMessages;
                 } else {
-                  // Aggiungi un nuovo messaggio di log
+                  // Add a new log message
                   return [...prev, { role: 'log', content: data.text }];
                 }
               });
@@ -315,7 +313,7 @@ export default function ChatGPTInterface() {
           // Keep the sessionId for history, but mark as ended
           console.log(`Session ${sessionId} ended.`);
           
-          // Aggiungere un messaggio di sistema che indica che la sessione è terminata
+          // Add a system message indicating the session has ended
           setMessages(prev => [
             ...prev,
             { 
@@ -341,7 +339,7 @@ export default function ChatGPTInterface() {
         setIsSessionActive(true);
         setIsStreamError(false); // Reset any stream errors
         
-        // Aggiungere un messaggio di sistema che indica l'inizio di una nuova sessione
+        // Add a system message indicating the start of a new session
         setMessages(prev => [
           ...prev,
           { 
@@ -368,7 +366,7 @@ export default function ChatGPTInterface() {
         }
       } catch (error) {
         console.error("Error starting new session:", error);
-        alert("Impossibile avviare una nuova sessione. Ricarica la pagina e riprova.");
+        alert("Unable to start a new session. Please reload the page and try again.");
       }
     }
   };
@@ -465,17 +463,17 @@ export default function ChatGPTInterface() {
       // Capture the screenshot from the browser
       const imageData = await captureScreenshot(selectedScreen);
       
-      // Verifica se la connessione è ancora attiva dopo la cattura dello screenshot
+      // Check if the connection is still active after capturing the screenshot
       if (!isConnected && isSessionActive && sessionId) {
         console.log("Connection lost after screenshot, attempting to reconnect...");
         
-        // Chiudi qualsiasi EventSource esistente
+        // Close any existing EventSource
         if (eventSourceRef.current) {
           eventSourceRef.current.close();
           eventSourceRef.current = null;
         }
         
-        // Ricrea l'EventSource
+        // Recreate the EventSource
         try {
           const eventSourceUrl = `${API_BASE_URL}/sessions/stream?session_id=${sessionId}`;
           console.log(`Reconnecting to SSE endpoint: ${eventSourceUrl}`);
@@ -509,9 +507,9 @@ export default function ChatGPTInterface() {
               } else if (data.type === 'connection') {
                 handleConnectionStatus(data.connected);
               } else if (data.type === 'log') {
-                // Gestione dei messaggi di log dal backend
+                // Handling log messages from the backend
                 setMessages(prev => {
-                  // Cerca un messaggio di log esistente e simile
+                  // Look for an existing and similar log message
                   const logIndex = prev.findIndex(m => 
                     m.role === 'log' && 
                     (m.content.includes('Analyzing') || 
@@ -520,12 +518,12 @@ export default function ChatGPTInterface() {
                   );
                   
                   if (logIndex !== -1) {
-                    // Aggiorna il messaggio di log esistente
+                    // Update the existing log message
                     const newMessages = [...prev];
                     newMessages[logIndex] = { role: 'log', content: data.text };
                     return newMessages;
                   } else {
-                    // Aggiungi un nuovo messaggio di log
+                    // Add a new log message
                     return [...prev, { role: 'log', content: data.text }];
                   }
                 });

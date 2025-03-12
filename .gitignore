@@ -196,3 +196,4 @@ out/
 .DS_Store
 
 saved_conversations/
+.cursor/
