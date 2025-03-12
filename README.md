@@ -1,84 +1,84 @@
-# Intervista Assistant
+# Interview Assistant
 
-Un assistente AI per colloqui tecnici con frontend React/Next.js.
+An AI assistant for technical interviews with React/Next.js frontend.
 
-## Struttura del progetto
+## Project Structure
 
-Il progetto è organizzato in due parti principali:
+The project is organized into two main parts:
 
-1. **Backend API** (Python/FastAPI): Gestisce la logica dell'applicazione e le connessioni con l'API di OpenAI
-2. **Frontend** (React/Next.js): Interfaccia utente moderna e reattiva
+1. **Backend API** (Python/FastAPI): Handles application logic and connections with the OpenAI API
+2. **Frontend** (React/Next.js): Modern and responsive user interface
 
-## Prerequisiti
+## Prerequisites
 
 - Python 3.8+
-- [Poetry](https://python-poetry.org/docs/#installation) per la gestione delle dipendenze Python
+- [Poetry](https://python-poetry.org/docs/#installation) for Python dependency management
 - Node.js 18+
-- npm o yarn
-- Un account OpenAI con una chiave API valida
+- npm or yarn
+- An OpenAI account with a valid API key
 
-## Configurazione
+## Configuration
 
 ### Backend (Python)
 
-1. Clonare il repository
-2. Installare le dipendenze con Poetry:
+1. Clone the repository
+2. Install dependencies with Poetry:
    ```bash
    poetry install
    ```
-3. Creare un file `.env` nella directory principale con il seguente contenuto:
+3. Create a `.env` file in the main directory with the following content:
    ```
    OPENAI_API_KEY=your_openai_api_key_here
    ```
 
 ### Frontend (Next.js)
 
-1. Accedere alla directory del frontend:
+1. Navigate to the frontend directory:
    ```bash
    cd frontend
    ```
-2. Installare le dipendenze:
+2. Install dependencies:
    ```bash
    npm install
-   # oppure
+   # or
    yarn install
    ```
-3. Creare un file `.env.local` con il seguente contenuto:
+3. Create a `.env.local` file with the following content:
    ```
    NEXT_PUBLIC_API_URL=http://localhost:8000
    ```
 
-## Avvio dell'applicazione
+## Starting the Application
 
-### Avvio del Backend API
+### Starting the Backend API
 
 ```bash
-# Dalla directory principale del progetto
+# From the main project directory
 poetry run start-api
-# oppure
+# or
 poetry run python -m intervista_assistant.api_launcher
 ```
 
-Il server API sarà disponibile all'indirizzo `http://localhost:8000`.
+The API server will be available at `http://localhost:8000`.
 
-### Avvio del Frontend Next.js
+### Starting the Next.js Frontend
 
 ```bash
-# Dalla directory frontend
+# From the frontend directory
 npm run dev
-# oppure
+# or
 yarn dev
 ```
 
-L'applicazione frontend sarà disponibile all'indirizzo `http://localhost:3000`.
+The frontend application will be available at `http://localhost:3000`.
 
-## Funzionalità
+## Features
 
-- Invio di messaggi testuali
-- Registrazione e trascrizione audio
-- Analisi di screenshot
-- Supporto per analisi avanzata ("Think")
-- Interfaccia utente moderna e reattiva
+- Text message sending
+- Audio recording and transcription
+- Screenshot analysis
+- Support for advanced analysis ("Think")
+- Modern and responsive user interface
 
 ## Description
 
