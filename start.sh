@@ -1,9 +1,15 @@
 #!/bin/bash
 
-# Default variables
-WATCH_MODE=true
-BACKEND_PORT=8000
-FRONTEND_PORT=3000
+# Load environment variables from .env.local if it exists
+if [ -f .env.local ]; then
+  echo "Loading environment variables from .env.local..."
+  export $(grep -v '^#' .env.local | xargs)
+fi
+
+# Default variables (can be overridden by .env.local)
+WATCH_MODE=${WATCH_MODE:-true}
+BACKEND_PORT=${PORT:-8000}
+FRONTEND_PORT=${FRONTEND_PORT:-3000}
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -82,6 +88,12 @@ fi
 
 # Set the port for the backend
 export PORT=$BACKEND_PORT
+
+# Copy .env.local to frontend if it doesn't exist there
+if [ -f "$SCRIPT_DIR/.env.local" ] && [ ! -f "$FRONTEND_DIR/.env.local" ]; then
+  echo "Copying .env.local to frontend directory..."
+  cp "$SCRIPT_DIR/.env.local" "$FRONTEND_DIR/.env.local"
+fi
 
 # Run backend with output to console instead of background
 python api_launcher.py --port $BACKEND_PORT --host 0.0.0.0 $debug_option $no_reloader_option 2>&1 | tee "$SCRIPT_DIR/logs/backend.log" &

@@ -32,6 +32,7 @@ flask-cors = "^5.0.1"
 flask-sock = "^0.7.0"
 python-socketio = "^5.12.1"
 flask-socketio = "^5.5.1"
+pyjwt = "^2.10.1"
 
 
 [tool.poetry.group.dev.dependencies]

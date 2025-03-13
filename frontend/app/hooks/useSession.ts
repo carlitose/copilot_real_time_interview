@@ -1,7 +1,13 @@
+"use client";
+
 import { useState, useCallback, useEffect } from 'react';
 import apiClient from '@/utils/api';
 import { Message } from '@/app/types/chat';
 import { AudioStreamControl, useAudioStream } from '@/utils/socketio';
+import axios from 'axios';
+import { v4 as uuidv4 } from 'uuid';
+import { useAuth } from '../context/AuthContext';
+import { useUserSettings } from './useUserSettings';
 
 interface SessionHookResult {
   sessionId: string | null;
@@ -20,6 +26,8 @@ interface SessionHookResult {
 }
 
 export function useSession(): SessionHookResult {
+  const { user, session } = useAuth();
+  const { settings } = useUserSettings();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [isRecording, setIsRecording] = useState<boolean>(false);
@@ -60,6 +68,34 @@ export function useSession(): SessionHookResult {
     }
   }, [sessionId, isSessionActive, isRecording, audioStreamControl]);
 
+  // Effect to handle logout
+  useEffect(() => {
+    // If user was logged in and now is logged out while session is active, close the session
+    if (!user && isSessionActive && sessionId) {
+      console.log('User logged out while session was active. Closing session...');
+      
+      // Stop audio recording if active
+      if (isRecording && audioStreamControl) {
+        audioStreamControl.stop();
+        setIsRecording(false);
+      }
+      
+      // Mark session as inactive
+      setIsSessionActive(false);
+      
+      // Add a system message
+      setMessages(prev => [
+        ...prev,
+        { 
+          role: 'system', 
+          content: '--- Session ended due to logout ---' 
+        }
+      ]);
+      
+      // We don't attempt to call the backend to end the session because the token is already invalid
+    }
+  }, [user, isSessionActive, sessionId, isRecording, audioStreamControl]);
+
   // Toggle session (start/stop)
   const toggleSession = useCallback(async () => {
     if (isSessionActive) {
@@ -75,11 +111,12 @@ export function useSession(): SessionHookResult {
       // End the session on the server
       if (sessionId) {
         try {
-          await apiClient.endSession(sessionId);
-        } catch (error) {
-          console.error("Error ending session:", error);
-        } finally {
-          // Indicate session is inactive
+          await axios.post(`${process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/api'}/sessions/${sessionId}/end`, {}, {
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${session?.access_token || ''}`
+            }
+          });
           setIsSessionActive(false);
           // Keep the sessionId for history, but mark as ended
           console.log(`Session ${sessionId} ended.`);
@@ -92,6 +129,8 @@ export function useSession(): SessionHookResult {
               content: '--- Session ended ---' 
             }
           ]);
+        } catch (error) {
+          console.error("Error ending session:", error);
         }
       }
     } else {
@@ -101,12 +140,19 @@ export function useSession(): SessionHookResult {
       // Always create a new session when starting
       try {
         // Create a new session ID every time we start
-        const newSessionId = await apiClient.createSession();
+        const newSessionId = uuidv4();
         console.log(`New session created: ${newSessionId}`);
         setSessionId(newSessionId);
         
         // Start the new session on the server
-        await apiClient.startSession(newSessionId);
+        await axios.post(`${process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/api'}/sessions/${newSessionId}/start`, {
+          openai_api_key: settings?.openai_key || undefined
+        }, {
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session?.access_token || ''}`
+          }
+        });
         setIsSessionActive(true);
         
         // Add a system message indicating the start of a new session
@@ -139,7 +185,7 @@ export function useSession(): SessionHookResult {
         alert("Unable to start a new session. Please reload the page and try again.");
       }
     }
-  }, [isSessionActive, isRecording, sessionId, audioStreamControl, setMessages]);
+  }, [isSessionActive, isRecording, sessionId, audioStreamControl, setMessages, session, settings]);
 
   // Send text message
   const sendTextMessage = useCallback(async (text: string) => {
@@ -153,7 +199,15 @@ export function useSession(): SessionHookResult {
       setMessages(prev => [...prev, { role: 'log', content: 'Processing your request...' }]);
       
       // Send the text message
-      const result = await apiClient.sendTextMessage(sessionId, text);
+      const result = await axios.post(`${process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/api'}/sessions/${sessionId}/messages`, {
+        content: text,
+        openai_api_key: settings?.openai_key || undefined
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session?.access_token || ''}`
+        }
+      });
       
       if (!result) {
         // Remove the waiting message
@@ -179,7 +233,7 @@ export function useSession(): SessionHookResult {
         { role: 'log', content: 'An error occurred while sending the message.' }
       ]);
     }
-  }, [sessionId, isSessionActive]);
+  }, [sessionId, isSessionActive, session, settings]);
 
   // Start think process
   const startThinkProcess = useCallback(async () => {
@@ -190,7 +244,14 @@ export function useSession(): SessionHookResult {
       setMessages(prev => [...prev, { role: 'log', content: 'Thinking about this conversation...' }]);
       
       // Start the thinking process
-      await apiClient.startThinkProcess(sessionId);
+      await axios.post(`${process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/api'}/sessions/${sessionId}/think`, {
+        openai_api_key: settings?.openai_key || undefined
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session?.access_token || ''}`
+        }
+      });
       
       // The response will be handled via SSE events
     } catch (error) {
@@ -205,16 +266,22 @@ export function useSession(): SessionHookResult {
         { role: 'log', content: 'An error occurred during the thinking process.' }
       ]);
     }
-  }, [sessionId, isSessionActive]);
+  }, [sessionId, isSessionActive, session, settings]);
 
   // Save conversation
   const saveConversation = useCallback(async () => {
     if (!sessionId) return;
     
     try {
-      const conversation = await apiClient.saveConversation(sessionId);
+      await axios.post(`${process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/api'}/sessions/${sessionId}/save`, {}, {
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session?.access_token || ''}`
+        }
+      });
       
       // Create and download the JSON file
+      const conversation = await apiClient.saveConversation(sessionId);
       const conversationData = JSON.stringify(conversation, null, 2);
       const blob = new Blob([conversationData], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -241,7 +308,7 @@ export function useSession(): SessionHookResult {
         { role: 'system', content: 'An error occurred while saving the conversation.' }
       ]);
     }
-  }, [sessionId]);
+  }, [sessionId, session, settings]);
 
   // Clear all messages
   const clearMessages = useCallback(() => {

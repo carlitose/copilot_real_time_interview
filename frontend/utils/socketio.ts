@@ -1,11 +1,14 @@
+"use client";
+
 /**
  * Module for handling audio streaming via Socket.IO
  */
 import { useEffect, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
+import { useAuth } from '@/app/context/AuthContext';
 
 // Connection URL for Socket.IO
-const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://127.0.0.1:8000';
+const SOCKET_URL = process.env.NEXT_PUBLIC_API_URL?.replace('/api', '') || 'http://localhost:8000';
 
 // Interface for audio stream control
 export interface AudioStreamControl {
@@ -20,6 +23,7 @@ export interface AudioStreamControl {
  * @returns Audio stream controls (start, stop, isActive)
  */
 export function useAudioStream(sessionId: string): AudioStreamControl {
+  const { session, user } = useAuth();
   const socketRef = useRef<Socket | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const processorRef = useRef<any>(null);
@@ -36,47 +40,72 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
   
   // Initialize Socket.IO
   useEffect(() => {
-    if (!socketRef.current) {
-      console.log(`[SOCKET.IO] Initializing Socket.IO for session ${sessionId}`);
-      socketRef.current = io(SOCKET_URL);
-      
-      socketRef.current.on('connect', () => {
-        console.log(`[SOCKET.IO] Successfully connected [ID: ${socketRef.current?.id}] for session ${sessionId}`);
-      });
-      
-      socketRef.current.on('disconnect', () => {
-        console.log('[SOCKET.IO] Disconnected');
-        setIsActive(false);
-        isActiveRef.current = false; // Update the ref as well
-      });
+    if (!sessionId) return;
 
-      socketRef.current.on('error', (error: any) => {
-        console.error('[SOCKET.IO] Error:', error);
-      });
+    // Setup authentication for Socket.IO
+    const authToken = session?.access_token;
+    const socketOptions = {
+      query: { sessionId },
+      auth: { token: authToken },
+      extraHeaders: {
+        Authorization: authToken ? `Bearer ${authToken}` : '',
+      },
+    };
 
-      socketRef.current.on('connect_error', (error: any) => {
-        console.error('[SOCKET.IO] Connection error:', error);
-      });
-    }
-    
-    // Cleanup when component unmounts
+    console.log(`Initializing Socket.IO connection to ${SOCKET_URL} for session ${sessionId}`);
+    socketRef.current = io(SOCKET_URL, socketOptions);
+
+    // Handle socket connect event
+    socketRef.current.on('connect', () => {
+      console.log('Socket connected successfully!');
+    });
+
+    // Handle socket connect_error event
+    socketRef.current.on('connect_error', (error) => {
+      console.error('Socket connection error:', error);
+      if (error.message.includes('Authentication')) {
+        console.error('Authentication error with Socket.IO. Please login again.');
+      }
+    });
+
+    // Clean up on unmount
     return () => {
-      if (processorRef.current) {
-        processorRef.current.disconnect();
-        processorRef.current = null;
-      }
-      
-      if (mediaStreamRef.current) {
-        mediaStreamRef.current.getTracks().forEach(track => track.stop());
-        mediaStreamRef.current = null;
-      }
-      
+      console.log('Disconnecting Socket.IO...');
       if (socketRef.current) {
         socketRef.current.disconnect();
         socketRef.current = null;
       }
     };
-  }, []);
+  }, [sessionId, session]);
+  
+  // Effect to handle logout
+  useEffect(() => {
+    // If user was logged in and now is logged out while socket is active
+    if (!user && socketRef.current) {
+      console.log('User logged out while socket was active. Disconnecting socket...');
+      
+      // Stop audio recording if active
+      if (isActiveRef.current) {
+        if (processorRef.current) {
+          processorRef.current.disconnect();
+          processorRef.current = null;
+        }
+        
+        if (mediaStreamRef.current) {
+          mediaStreamRef.current.getTracks().forEach(track => track.stop());
+          mediaStreamRef.current = null;
+        }
+        
+        // Update both React state and the ref
+        setIsActive(false);
+        isActiveRef.current = false;
+      }
+      
+      // Disconnect socket
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+  }, [user]);
   
   // Register timestamp of last audio processing
   const lastProcessTimestampRef = useRef<number>(Date.now());
