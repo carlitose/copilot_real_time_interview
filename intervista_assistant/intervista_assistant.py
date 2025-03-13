@@ -653,7 +653,6 @@ class ImageAnalysisWorker(QObject):
             response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=self.messages,
-                max_tokens=1000
             )
             
             # Ottieni la risposta dell'assistente
