@@ -11,7 +11,7 @@ from datetime import datetime
 from flask import Flask, request, jsonify, Response, stream_with_context
 
 # Import from core modules
-from intervista_assistant.core.utils import require_session, active_sessions
+from intervista_assistant.core.utils import require_session, require_auth, active_sessions
 from intervista_assistant.core.session_manager import SessionManager
 from intervista_assistant.api.sse import session_sse_generator
 
@@ -26,11 +26,12 @@ def register_routes(app):
         """Handle OPTIONS requests for all API endpoints."""
         response = jsonify({"success": True})
         response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
         response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
         return response, 200
 
     @app.route('/api/sessions', methods=['POST', 'OPTIONS'])
+    @require_auth
     def create_session():
         """Creates a new session."""
         if request.method == 'OPTIONS':
@@ -141,6 +142,7 @@ def register_routes(app):
             }), 500
 
     @app.route('/api/sessions/stream', methods=['GET'])
+    @require_auth
     def stream_session_updates():
         """SSE stream for session updates."""
         session_id = request.args.get('session_id')
@@ -157,7 +159,7 @@ def register_routes(app):
             'Connection': 'keep-alive',
             'Content-Type': 'text/event-stream',
             'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
             'Access-Control-Allow-Methods': 'GET'
         }
         
@@ -264,6 +266,7 @@ def register_routes(app):
             }), 400
 
     @app.route('/api/sessions/status', methods=['GET', 'OPTIONS'])
+    @require_auth
     def get_session_status():
         """Gets the status of a session."""
         if request.method == 'OPTIONS':

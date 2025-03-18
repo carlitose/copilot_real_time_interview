@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-Socket.IO handlers for Intervista Assistant.
-Manages real-time communication with the frontend.
+Socket.IO event handlers for Intervista Assistant API.
+Handles all Socket.IO events and callbacks.
 """
+import os
 import time
 import logging
-import numpy as np
+import json
+import base64
+import traceback
 from datetime import datetime
+from flask import request, current_app
 from flask_socketio import emit
-from flask import request
+import jwt
 
 from intervista_assistant.core.utils import active_sessions, start_cleanup_task
 
@@ -20,112 +24,136 @@ def register_socketio_handlers(socketio):
     
     @socketio.on('connect')
     def handle_connect():
-        """Handles a Socket.IO client connection."""
-        logger.info(f"New Socket.IO client connected: {request.sid}")
-        # Start the cleanup task if not already started
+        """Handle client connection."""
+        sid = request.sid
+        logger.info(f"[SOCKET.IO] Client connected: {sid}")
+        
+        # Avvia il task di pulizia se non è già in esecuzione
         start_cleanup_task()
-
+        
+        # Verifica token JWT negli headers
+        token = None
+        auth_header = request.headers.get('Authorization', '')
+        if auth_header.startswith('Bearer '):
+            token = auth_header.split(' ')[1]
+        
+        if not token:
+            logger.warning(f"[SOCKET.IO] Connessione senza token JWT: {sid}")
+            return True  # Accetta comunque la connessione, ma non autenticata
+        
+        try:
+            # Ottieni il JWT_SECRET dall'ambiente o dalle variabili d'app
+            jwt_secret = os.environ.get('JWT_SECRET') or current_app.config.get('JWT_SECRET')
+            if not jwt_secret:
+                logger.error("[SOCKET.IO] JWT_SECRET non configurato!")
+                return True  # Accetta comunque la connessione in caso di errore di configurazione
+                
+            # Verifica e decodifica del JWT
+            decoded_payload = jwt.decode(token, jwt_secret, algorithms=["HS256"])
+            
+            # Memorizza l'utente autenticato nei dati della sessione Socket.IO
+            flask_request = request._get_current_object()
+            flask_request.user = decoded_payload
+            
+            logger.info(f"[SOCKET.IO] Client autenticato: {sid}, utente: {decoded_payload.get('sub')}")
+        
+        except jwt.ExpiredSignatureError:
+            logger.warning(f"[SOCKET.IO] Token JWT scaduto: {sid}")
+        except jwt.InvalidTokenError:
+            logger.warning(f"[SOCKET.IO] Token JWT non valido: {sid}")
+        except Exception as e:
+            logger.error(f"[SOCKET.IO] Errore verifica token: {e}")
+        
+        return True
+    
     @socketio.on('disconnect')
     def handle_disconnect():
-        """Handles a Socket.IO client disconnection."""
-        logger.info(f"Socket.IO client disconnected: {request.sid}")
-
+        """Handle client disconnection."""
+        sid = request.sid
+        logger.info(f"[SOCKET.IO] Client disconnected: {sid}")
+    
     @socketio.on('audio_data')
     def handle_audio_data(session_id, audio_data):
         """
-        Handles audio data received from the client.
-        This is the ONLY way to send audio data to the backend.
+        Handle audio data streamed from the client.
+        Args:
+            session_id: Intervista Assistant session ID
+            audio_data: Audio data as base64 string or bytes array
         """
+        # Default acknowledgement response
         acknowledgement = {
-            'received': False, 
-            'error': None,
-            'timestamp': time.time(),
-            'session_active': session_id in active_sessions
+            'received': True, 
+            'timestamp': time.time()
         }
         
+        # Verifica dell'autenticazione
+        flask_request = request._get_current_object()
+        user = getattr(flask_request, 'user', None)
+        
+        # Se non c'è user nell'oggetto request, l'utente non è autenticato
+        if not user:
+            logger.warning(f"[SOCKET.IO:AUDIO] Richiesta non autenticata: {request.sid}, sessione: {session_id}")
+            acknowledgement['error'] = 'Autenticazione richiesta'
+            return acknowledgement
+        
+        # Check if session exists
+        if session_id not in active_sessions:
+            logger.warning(f"[SOCKET.IO:AUDIO] Session not found: {session_id}")
+            acknowledgement['error'] = 'Session not found'
+            return acknowledgement
+        
+        # Get session
+        session = active_sessions[session_id]
+        
+        # Controlla che la sessione appartiene all'utente autenticato
+        # Qui potresti implementare una verifica più specifica, ad esempio verificando che
+        # l'ID della sessione sia associato all'utente nel tuo database
+        
+        # Check if the session is recording
+        if not session.recording or not session.text_thread:
+            logger.warning(f"[SOCKET.IO:AUDIO] Session {session_id} not recording")
+            emit('error', {'message': 'Session not recording'})
+            acknowledgement['error'] = 'Session not recording'
+            return acknowledgement
+        
+        # Check if audio_data is not empty
+        if not audio_data:
+            logger.warning(f"[SOCKET.IO:AUDIO] Empty audio data received for session {session_id}")
+            acknowledgement['error'] = 'Empty audio data'
+            return acknowledgement
+            
         try:
-            # Log only essential metadata about the audio data
-            audio_type = type(audio_data).__name__
-            if isinstance(audio_data, list):
-                audio_length = len(audio_data)
-                logger.info(f"[SOCKET.IO:AUDIO] Received audio data for session {session_id}: {audio_length} samples, type={audio_type}")
-                acknowledgement['samples'] = audio_length
-            elif isinstance(audio_data, bytes):
-                logger.info(f"[SOCKET.IO:AUDIO] Received audio data for session {session_id}: {len(audio_data)} bytes, type={audio_type}")
-                acknowledgement['bytes'] = len(audio_data)
+            # Update the last activity timestamp
+            session.last_activity = datetime.now()
+            
+            # Get the text thread
+            text_thread = session.text_thread
+            
+            # Check if websocket is connected
+            with text_thread.lock:
+                websocket_connected = text_thread.connected
+                websocket_reconnect_attempts = text_thread.reconnect_attempts
+                
+            # Add audio data to the queue
+            if text_thread and websocket_connected:
+                try:
+                    # Se i dati audio sono già in formato binario, usali direttamente
+                    # altrimenti decodificali da base64
+                    if isinstance(audio_data, str):
+                        binary_audio = base64.b64decode(audio_data)
+                    else:
+                        binary_audio = audio_data
+                    
+                    # Send the binary audio data to the text thread
+                    text_thread.add_audio_data(binary_audio)
+                    
+                    # Successfully processed
+                    return acknowledgement
+                except Exception as e:
+                    logger.error(f"[SOCKET.IO:AUDIO] Error processing audio data: {str(e)}")
+                    acknowledgement['error'] = f"Error processing audio: {str(e)}"
+                    return acknowledgement
             else:
-                logger.info(f"[SOCKET.IO:AUDIO] Received audio data for session {session_id}: type={audio_type}")
-                acknowledgement['type'] = audio_type
-            
-            if session_id not in active_sessions:
-                logger.error(f"[SOCKET.IO:AUDIO] Session {session_id} not found")
-                emit('error', {'message': 'Session not found'})
-                acknowledgement['error'] = 'Session not found'
-                return acknowledgement
-            
-            session = active_sessions[session_id]
-            acknowledgement['session_recording'] = session.recording
-            
-            # Check if the session is recording
-            if not session.recording or not session.text_thread:
-                logger.warning(f"[SOCKET.IO:AUDIO] Session {session_id} not recording")
-                emit('error', {'message': 'Session not recording'})
-                acknowledgement['error'] = 'Session not recording'
-                return acknowledgement
-            
-            # Check if audio_data is not empty
-            if not audio_data:
-                logger.warning(f"[SOCKET.IO:AUDIO] Empty audio data received for session {session_id}")
-                acknowledgement['error'] = 'Empty audio data'
-                return acknowledgement
-                
-            try:
-                # Update the last activity timestamp
-                session.last_activity = datetime.now()
-                
-                # Verify and convert the audio to the correct format
-                if isinstance(audio_data, list):
-                    # Check for valid values based on 16-bit PCM requirements
-                    if any(not isinstance(sample, (int, float)) for sample in audio_data):
-                        logger.error(f"[SOCKET.IO:AUDIO] Invalid audio data format: non-numeric samples")
-                        acknowledgement['error'] = 'Invalid audio data format'
-                        emit('error', {'message': 'Invalid audio data format: non-numeric samples'})
-                        return acknowledgement
-                    
-                    # Ensure there are enough samples (at least 10ms of audio at 24kHz = 240 samples)
-                    if len(audio_data) < 240:
-                        logger.warning(f"[SOCKET.IO:AUDIO] Audio clip too short: {len(audio_data)} samples")
-                        acknowledgement['warning'] = 'Audio clip too short'
-                    
-                    # Normalize values to ensure compatibility with 16-bit PCM (-32768 to 32767)
-                    max_value = max(abs(sample) if isinstance(sample, int) else abs(float(sample)) for sample in audio_data)
-                    
-                    # If values are too large or too small, normalize them
-                    if max_value > 32767 or max_value < 1:
-                        logger.info(f"[SOCKET.IO:AUDIO] Normalizing audio samples: max value = {max_value}")
-                        if max_value > 0:  # Avoid division by zero
-                            scaling_factor = 32767.0 / max_value
-                            audio_data = [int(sample * scaling_factor) for sample in audio_data]
-                    
-                    # Ensure it is of the correct type for OpenAI (16-bit PCM)
-                    audio_data = np.array(audio_data, dtype=np.int16)
-                    logger.info(f"[SOCKET.IO:AUDIO] Converted list to numpy array for session {session_id}: {len(audio_data)} samples")
-                    
-                    # Calculate the duration of the received audio (assuming 24kHz)
-                    audio_duration_ms = (len(audio_data) / 24000) * 1000
-                    logger.info(f"[SOCKET.IO:AUDIO] Approximate audio duration: {audio_duration_ms:.2f}ms at 24kHz")
-                    acknowledgement['duration_ms'] = audio_duration_ms
-                
-                # Check websocket connection status
-                websocket_connected = False
-                websocket_reconnect_attempts = 0
-                if session.text_thread:
-                    websocket_connected = session.text_thread.connected
-                    websocket_reconnect_attempts = session.text_thread.reconnect_attempts
-                
-                acknowledgement['websocket_connected'] = websocket_connected
-                acknowledgement['websocket_reconnect_attempts'] = websocket_reconnect_attempts
-                
                 if not websocket_connected:
                     logger.warning(f"[SOCKET.IO:AUDIO] WebSocket not connected for session {session_id}, handling gracefully...")
                     
@@ -148,34 +176,9 @@ def register_socketio_handlers(socketio):
                         acknowledgement['error'] = 'WebSocket connection failed'
                         emit('error', {'message': 'WebSocket connection failed, please restart the session'})
                         return acknowledgement
-                
-                # Add the audio data to the text thread buffer
-                if session.text_thread:
-                    # Now we can send the data to the text thread
-                    success = session.text_thread.add_audio_data(audio_data)
-                    acknowledgement['received'] = success
-                    
-                    # Add info about the data size
-                    if isinstance(audio_data, np.ndarray):
-                        acknowledgement['bytes_processed'] = audio_data.nbytes
-                    elif isinstance(audio_data, bytes):
-                        acknowledgement['bytes_processed'] = len(audio_data)
-                    else:
-                        acknowledgement['bytes_processed'] = 'unknown'
-                    
-                    # Update the status for the frontend
-                    if success:
-                        emit('audio_processed', {'success': True, 'bytes': acknowledgement.get('bytes_processed', 0)})
-                
-            except Exception as e:
-                logger.error(f"[SOCKET.IO:AUDIO] Error processing audio in text thread: {str(e)}")
-                acknowledgement['error'] = f"Audio processing error: {str(e)}"
-                emit('error', {'message': f'Audio processing error: {str(e)}'})
-            
-            return acknowledgement
-            
         except Exception as e:
-            # Catch-all for unexpected errors
-            logger.error(f"[SOCKET.IO:AUDIO] Unexpected error: {str(e)}")
-            acknowledgement['error'] = f"Unexpected error: {str(e)}"
+            # Log the full stack trace for debugging
+            logger.error(f"[SOCKET.IO:AUDIO] Unhandled exception: {str(e)}")
+            logger.error(traceback.format_exc())
+            acknowledgement['error'] = f"Server error: {str(e)}"
             return acknowledgement 

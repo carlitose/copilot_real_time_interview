@@ -30,6 +30,11 @@ def create_app():
     app = Flask(__name__)
     CORS(app, resources={r"/api/*": {"origins": "*"}})
     
+    # Configura il JWT_SECRET dall'ambiente
+    app.config['JWT_SECRET'] = os.environ.get('JWT_SECRET')
+    if not app.config['JWT_SECRET']:
+        logger.warning("JWT_SECRET non configurato! L'autenticazione non funzionerà correttamente.")
+    
     # Initialize Socket.IO
     socketio = SocketIO(app, cors_allowed_origins="*", logger=False, engineio_logger=False)
     

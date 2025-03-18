@@ -3,6 +3,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
+import { supabase } from './supabase';
 
 // Connection URL for Socket.IO
 const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://127.0.0.1:8000';
@@ -12,6 +13,20 @@ export interface AudioStreamControl {
   start: () => void;
   stop: () => void;
   isActive: boolean;
+}
+
+/**
+ * Ottiene il token JWT dalla sessione corrente di Supabase
+ * @returns Promise che risolve con il token JWT o null se non disponibile
+ */
+async function getAuthToken(): Promise<string | null> {
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    return session?.access_token || null;
+  } catch (error) {
+    console.error('Errore nel recupero del token:', error);
+    return null;
+  }
 }
 
 /**
@@ -36,28 +51,44 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
   
   // Initialize Socket.IO
   useEffect(() => {
-    if (!socketRef.current) {
-      console.log(`[SOCKET.IO] Initializing Socket.IO for session ${sessionId}`);
-      socketRef.current = io(SOCKET_URL);
-      
-      socketRef.current.on('connect', () => {
-        console.log(`[SOCKET.IO] Successfully connected [ID: ${socketRef.current?.id}] for session ${sessionId}`);
-      });
-      
-      socketRef.current.on('disconnect', () => {
-        console.log('[SOCKET.IO] Disconnected');
-        setIsActive(false);
-        isActiveRef.current = false; // Update the ref as well
-      });
+    // Funzione asincrona per inizializzare Socket.IO con il token
+    const initializeSocket = async () => {
+      if (!socketRef.current) {
+        console.log(`[SOCKET.IO] Initializing Socket.IO for session ${sessionId}`);
+        
+        // Ottieni il token JWT
+        const token = await getAuthToken();
+        
+        // Configura Socket.IO con l'header di autorizzazione
+        socketRef.current = io(SOCKET_URL, {
+          auth: token ? { token } : undefined,
+          extraHeaders: token ? {
+            Authorization: `Bearer ${token}`
+          } : {}
+        });
+        
+        socketRef.current.on('connect', () => {
+          console.log(`[SOCKET.IO] Successfully connected [ID: ${socketRef.current?.id}] for session ${sessionId}`);
+        });
+        
+        socketRef.current.on('disconnect', () => {
+          console.log('[SOCKET.IO] Disconnected');
+          setIsActive(false);
+          isActiveRef.current = false; // Update the ref as well
+        });
 
-      socketRef.current.on('error', (error: any) => {
-        console.error('[SOCKET.IO] Error:', error);
-      });
+        socketRef.current.on('error', (error: any) => {
+          console.error('[SOCKET.IO] Error:', error);
+        });
 
-      socketRef.current.on('connect_error', (error: any) => {
-        console.error('[SOCKET.IO] Connection error:', error);
-      });
-    }
+        socketRef.current.on('connect_error', (error: any) => {
+          console.error('[SOCKET.IO] Connection error:', error);
+        });
+      }
+    };
+    
+    // Chiama la funzione di inizializzazione
+    initializeSocket();
     
     // Cleanup when component unmounts
     return () => {

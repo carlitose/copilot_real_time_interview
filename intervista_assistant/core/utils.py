@@ -9,7 +9,9 @@ import threading
 import time
 from datetime import datetime
 from functools import wraps
-from flask import request, jsonify
+from flask import request, jsonify, current_app
+
+import jwt
 
 # Dictionary to store active sessions
 active_sessions = {}
@@ -17,14 +19,42 @@ active_sessions = {}
 # Maximum inactivity time for a session (minutes)
 SESSION_TIMEOUT_MINUTES = 30
 
-# Decorator to check if the session exists
+# Decorator to check if the session exists and verify JWT token
 def require_session(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         # Skip session check for OPTIONS requests
         if request.method == 'OPTIONS':
             return jsonify({"success": True}), 200
+        
+        # Verifica del token JWT
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith("Bearer "):
+            return jsonify({"success": False, "error": "Token mancante o malformato"}), 401
+        
+        token = auth_header.split(" ")[1]  # Prende il token dopo "Bearer"
+        try:
+            # Ottieni il JWT_SECRET dall'ambiente o dalle variabili d'app
+            jwt_secret = os.environ.get('JWT_SECRET') or current_app.config.get('JWT_SECRET')
+            if not jwt_secret:
+                return jsonify({"success": False, "error": "JWT_SECRET non configurato sul server"}), 500
+                
+            # Verifica e decodifica del JWT
+            decoded_payload = jwt.decode(token, jwt_secret, algorithms=["HS256"])
             
+            # Verifica che il ruolo sia 'authenticated'
+            if decoded_payload.get('role') != 'authenticated':
+                return jsonify({"success": False, "error": "Permessi insufficienti"}), 403
+                
+            # Memorizza le informazioni utente decodificate dal token
+            request.user = decoded_payload
+            
+        except jwt.ExpiredSignatureError:
+            return jsonify({"success": False, "error": "Token JWT scaduto"}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({"success": False, "error": "Token JWT non valido"}), 401
+            
+        # Verifica la sessione
         session_id = request.json.get('session_id')
         if not session_id or session_id not in active_sessions:
             return jsonify({"success": False, "error": "Session not found"}), 404
@@ -33,6 +63,44 @@ def require_session(f):
         request.session_manager = active_sessions.get(session_id)
         if not request.session_manager:
             return jsonify({"success": False, "error": "Session disappeared during request processing"}), 404
+            
+        return f(*args, **kwargs)
+    return decorated_function
+
+# Decorator per verificare il token JWT nelle richieste GET
+def require_auth(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Skip auth check for OPTIONS requests
+        if request.method == 'OPTIONS':
+            return jsonify({"success": True}), 200
+        
+        # Verifica del token JWT
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith("Bearer "):
+            return jsonify({"success": False, "error": "Token mancante o malformato"}), 401
+        
+        token = auth_header.split(" ")[1]  # Prende il token dopo "Bearer"
+        try:
+            # Ottieni il JWT_SECRET dall'ambiente o dalle variabili d'app
+            jwt_secret = os.environ.get('JWT_SECRET') or current_app.config.get('JWT_SECRET')
+            if not jwt_secret:
+                return jsonify({"success": False, "error": "JWT_SECRET non configurato sul server"}), 500
+                
+            # Verifica e decodifica del JWT
+            decoded_payload = jwt.decode(token, jwt_secret, algorithms=["HS256"])
+            
+            # Verifica che il ruolo sia 'authenticated'
+            if decoded_payload.get('role') != 'authenticated':
+                return jsonify({"success": False, "error": "Permessi insufficienti"}), 403
+                
+            # Memorizza le informazioni utente decodificate dal token
+            request.user = decoded_payload
+            
+        except jwt.ExpiredSignatureError:
+            return jsonify({"success": False, "error": "Token JWT scaduto"}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({"success": False, "error": "Token JWT non valido"}), 401
             
         return f(*args, **kwargs)
     return decorated_function
