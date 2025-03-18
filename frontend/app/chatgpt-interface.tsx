@@ -2,6 +2,7 @@
 import { useEffect } from "react"
 
 // Importing components
+import Navbar from '@/app/components/Navbar'
 import MessageList from '@/app/components/chat/MessageList'
 import MessageInput from '@/app/components/chat/MessageInput'
 import ControlBar from '@/app/components/chat/ControlBar'
@@ -68,9 +69,7 @@ export default function ChatGPTInterface() {
 
   return (
     <div className="flex flex-col h-screen bg-slate-950 text-slate-50">
-      <header className="p-4 border-b border-slate-800 flex justify-between items-center">
-        <h1 className="text-xl font-bold">AI Assistant Audio</h1>
-      </header>
+      <Navbar />
       
       <MessageList 
         messages={messages} 
