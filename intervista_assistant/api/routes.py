@@ -11,7 +11,7 @@ from datetime import datetime
 from flask import Flask, request, jsonify, Response, stream_with_context
 
 # Import from core modules
-from intervista_assistant.core.utils import require_session, active_sessions
+from intervista_assistant.core.utils import require_session, require_auth, active_sessions
 from intervista_assistant.core.session_manager import SessionManager
 from intervista_assistant.api.sse import session_sse_generator
 
@@ -26,7 +26,7 @@ def register_routes(app):
         """Handle OPTIONS requests for all API endpoints."""
         response = jsonify({"success": True})
         response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
         response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
         return response, 200
 
@@ -57,6 +57,7 @@ def register_routes(app):
         }), 201
 
     @app.route('/api/sessions/start', methods=['POST', 'OPTIONS'])
+    @require_auth
     @require_session
     def start_session():
         """Starts a session with the specified session_id."""
@@ -106,6 +107,7 @@ def register_routes(app):
             }), 500
 
     @app.route('/api/sessions/end', methods=['POST', 'OPTIONS'])
+    @require_auth
     @require_session
     def end_session():
         """Ends an existing session."""
@@ -157,7 +159,7 @@ def register_routes(app):
             'Connection': 'keep-alive',
             'Content-Type': 'text/event-stream',
             'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
             'Access-Control-Allow-Methods': 'GET'
         }
         
@@ -168,6 +170,7 @@ def register_routes(app):
         )
 
     @app.route('/api/sessions/text', methods=['POST'])
+    @require_auth
     @require_session
     def send_text_message():
         """Sends a text message to the model."""
@@ -195,6 +198,7 @@ def register_routes(app):
             }), 400
 
     @app.route('/api/sessions/analyze-screenshot', methods=['POST'])
+    @require_auth
     @require_session
     def analyze_screenshot():
         """Analyzes a screenshot captured by the frontend."""
@@ -244,6 +248,7 @@ def register_routes(app):
             }), 400
 
     @app.route('/api/sessions/think', methods=['POST'])
+    @require_auth
     @require_session
     def start_think_process():
         """Starts the advanced thinking process."""
@@ -264,6 +269,7 @@ def register_routes(app):
             }), 400
 
     @app.route('/api/sessions/status', methods=['GET', 'OPTIONS'])
+    @require_auth
     def get_session_status():
         """Gets the status of a session."""
         if request.method == 'OPTIONS':
@@ -284,6 +290,7 @@ def register_routes(app):
         }), 200
 
     @app.route('/api/sessions/save', methods=['POST'])
+    @require_auth
     @require_session
     def save_conversation():
         """Saves the conversation to a JSON file."""
@@ -302,4 +309,18 @@ def register_routes(app):
             return jsonify({
                 "success": False,
                 "error": f"Unable to save the conversation: {result}"
-            }), 500 
+            }), 500
+
+    @app.route('/api/test-auth', methods=['GET', 'OPTIONS'])
+    @require_auth
+    def test_auth():
+        """Test endpoint to verify authentication."""
+        if request.method == 'OPTIONS':
+            return jsonify({"success": True}), 200
+            
+        return jsonify({
+            "success": True,
+            "message": "Authentication successful",
+            "user_id": request.user_id,
+            "user_email": request.user_email
+        }), 200 

@@ -3,6 +3,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
+import { supabase } from './supabase';
 
 // Connection URL for Socket.IO
 const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://127.0.0.1:8000';
@@ -36,28 +37,45 @@ export function useAudioStream(sessionId: string): AudioStreamControl {
   
   // Initialize Socket.IO
   useEffect(() => {
-    if (!socketRef.current) {
-      console.log(`[SOCKET.IO] Initializing Socket.IO for session ${sessionId}`);
-      socketRef.current = io(SOCKET_URL);
-      
-      socketRef.current.on('connect', () => {
-        console.log(`[SOCKET.IO] Successfully connected [ID: ${socketRef.current?.id}] for session ${sessionId}`);
-      });
-      
-      socketRef.current.on('disconnect', () => {
-        console.log('[SOCKET.IO] Disconnected');
-        setIsActive(false);
-        isActiveRef.current = false; // Update the ref as well
-      });
+    const initializeSocket = async () => {
+      if (!socketRef.current) {
+        console.log(`[SOCKET.IO] Initializing Socket.IO for session ${sessionId}`);
+        
+        // Get the authentication token
+        const { data: { session } } = await supabase.auth.getSession();
+        const authToken = session?.access_token || '';
+        
+        // Connect with auth token in headers
+        socketRef.current = io(SOCKET_URL, {
+          extraHeaders: {
+            Authorization: `Bearer ${authToken}`
+          },
+          query: {
+            session_id: sessionId
+          }
+        });
+        
+        socketRef.current.on('connect', () => {
+          console.log(`[SOCKET.IO] Successfully connected [ID: ${socketRef.current?.id}] for session ${sessionId}`);
+        });
+        
+        socketRef.current.on('disconnect', () => {
+          console.log('[SOCKET.IO] Disconnected');
+          setIsActive(false);
+          isActiveRef.current = false; // Update the ref as well
+        });
 
-      socketRef.current.on('error', (error: any) => {
-        console.error('[SOCKET.IO] Error:', error);
-      });
+        socketRef.current.on('error', (error: any) => {
+          console.error('[SOCKET.IO] Error:', error);
+        });
 
-      socketRef.current.on('connect_error', (error: any) => {
-        console.error('[SOCKET.IO] Connection error:', error);
-      });
-    }
+        socketRef.current.on('connect_error', (error: any) => {
+          console.error('[SOCKET.IO] Connection error:', error);
+        });
+      }
+    };
+    
+    initializeSocket();
     
     // Cleanup when component unmounts
     return () => {

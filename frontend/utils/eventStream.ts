@@ -2,6 +2,8 @@
  * Module for managing event streams from the server (SSE)
  */
 import { useEffect, useRef } from 'react';
+import { EventSourcePolyfill } from 'event-source-polyfill';
+import { supabase } from './supabase';
 
 // Base URL for the API
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/api';
@@ -40,7 +42,7 @@ export interface StreamCallbacks {
   onTranscription?: (update: TranscriptionUpdate) => void;
   onResponse?: (update: ResponseUpdate) => void;
   onError?: (update: ErrorUpdate) => void;
-  onConnectionError?: (error: Event) => void;
+  onConnectionError?: (error: any) => void;
   onConnectionStatus?: (connected: boolean) => void;
 }
 
@@ -55,7 +57,7 @@ export interface StreamControl {
  * Class that manages the EventSource connection
  */
 class EventStreamManager {
-  private eventSource: EventSource | null = null;
+  private eventSource: EventSourcePolyfill | null = null;
   private sessionId: string;
   private callbacks: StreamCallbacks;
 
@@ -67,7 +69,7 @@ class EventStreamManager {
   /**
    * Starts managing events
    */
-  connect(): void {
+  async connect(): Promise<void> {
     if (!this.sessionId) return;
     
     // Close any existing event sources
@@ -75,63 +77,79 @@ class EventStreamManager {
 
     console.log(`[EventStream] Connecting to SSE endpoint for session ${this.sessionId}`);
     
-    // Create a new EventSource for SSE events
-    this.eventSource = new EventSource(`${API_BASE_URL}/sessions/stream?session_id=${this.sessionId}`);
-    
-    // Generic handler for messages
-    this.eventSource.onmessage = (event) => {
-      console.log(`[EventStream] Raw event received: ${event.data}`);
+    try {
+      // Get the authentication token
+      const { data: { session } } = await supabase.auth.getSession();
+      const authToken = session?.access_token || '';
       
-      try {
-        const data = JSON.parse(event.data);
-        
-        // Check that there is a defined type
-        if (!data || typeof data !== 'object' || !('type' in data)) {
-          console.warn('[EventStream] Received data without type property:', data);
-          return;
+      // Create a new EventSource for SSE events with auth headers
+      this.eventSource = new EventSourcePolyfill(
+        `${API_BASE_URL}/sessions/stream?session_id=${this.sessionId}`,
+        {
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'Authorization': `Bearer ${authToken}`
+          }
         }
+      );
+      
+      // Generic handler for messages
+      this.eventSource.onmessage = (event) => {
+        console.log(`[EventStream] Raw event received: ${event.data}`);
         
-        console.log(`[EventStream] Parsed event type: ${data.type}`);
-        
-        // Distribute messages based on type
-        switch (data.type) {
-          case 'transcription':
-            console.log(`[EventStream] Transcription received: ${(data as TranscriptionUpdate).text.substring(0, 30)}...`);
-            this.callbacks.onTranscription?.(data as TranscriptionUpdate);
-            break;
-          case 'response':
-            console.log(`[EventStream] Response received: ${(data as ResponseUpdate).text.substring(0, 30)}...`);
-            this.callbacks.onResponse?.(data as ResponseUpdate);
-            break;
-          case 'error':
-            console.log(`[EventStream] Error received: ${(data as ErrorUpdate).message}`);
-            this.callbacks.onError?.(data as ErrorUpdate);
-            break;
-          case 'connection':
-            console.log(`[EventStream] Connection status: ${(data as ConnectionUpdate).connected ? 'connected' : 'disconnected'}`);
-            this.callbacks.onConnectionStatus?.((data as ConnectionUpdate).connected);
-            break;
-          default:
-            console.log(`[EventStream] Unknown event type: ${data.type}`);
+        try {
+          const data = JSON.parse(event.data);
+          
+          // Check that there is a defined type
+          if (!data || typeof data !== 'object' || !('type' in data)) {
+            console.warn('[EventStream] Received data without type property:', data);
+            return;
+          }
+          
+          console.log(`[EventStream] Parsed event type: ${data.type}`);
+          
+          // Distribute messages based on type
+          switch (data.type) {
+            case 'transcription':
+              console.log(`[EventStream] Transcription received: ${(data as TranscriptionUpdate).text.substring(0, 30)}...`);
+              this.callbacks.onTranscription?.(data as TranscriptionUpdate);
+              break;
+            case 'response':
+              console.log(`[EventStream] Response received: ${(data as ResponseUpdate).text.substring(0, 30)}...`);
+              this.callbacks.onResponse?.(data as ResponseUpdate);
+              break;
+            case 'error':
+              console.log(`[EventStream] Error received: ${(data as ErrorUpdate).message}`);
+              this.callbacks.onError?.(data as ErrorUpdate);
+              break;
+            case 'connection':
+              console.log(`[EventStream] Connection status: ${(data as ConnectionUpdate).connected ? 'connected' : 'disconnected'}`);
+              this.callbacks.onConnectionStatus?.((data as ConnectionUpdate).connected);
+              break;
+            default:
+              console.log(`[EventStream] Unknown event type: ${data.type}`);
+          }
+        } catch (error) {
+          console.error('[EventStream] Error parsing SSE message:', error);
+          console.error('[EventStream] Raw message data:', event.data);
         }
-      } catch (error) {
-        console.error('[EventStream] Error parsing SSE message:', error);
-        console.error('[EventStream] Raw message data:', event.data);
-      }
-    };
-    
-    // Error handling
-    this.eventSource.onerror = (error) => {
-      console.error('[EventStream] SSE connection error:', error);
-      if (this.callbacks.onConnectionError) {
-        this.callbacks.onConnectionError(error);
-      }
-    };
-    
-    // Handling the open connection
-    this.eventSource.onopen = () => {
-      console.log('[EventStream] SSE connection opened');
-    };
+      };
+      
+      // Error handling
+      this.eventSource.onerror = (error) => {
+        console.error('[EventStream] SSE connection error:', error);
+        if (this.callbacks.onConnectionError) {
+          this.callbacks.onConnectionError(error);
+        }
+      };
+      
+      // Handling the open connection
+      this.eventSource.onopen = () => {
+        console.log('[EventStream] SSE connection opened');
+      };
+    } catch (error) {
+      console.error('[EventStream] Error initializing SSE connection:', error);
+    }
   }
 
   /**

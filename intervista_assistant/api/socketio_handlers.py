@@ -7,10 +7,10 @@ import time
 import logging
 import numpy as np
 from datetime import datetime
-from flask_socketio import emit
+from flask_socketio import emit, disconnect
 from flask import request
 
-from intervista_assistant.core.utils import active_sessions, start_cleanup_task
+from intervista_assistant.core.utils import active_sessions, start_cleanup_task, verify_token
 
 # Logging configuration
 logger = logging.getLogger(__name__)
@@ -21,9 +21,34 @@ def register_socketio_handlers(socketio):
     @socketio.on('connect')
     def handle_connect():
         """Handles a Socket.IO client connection."""
-        logger.info(f"New Socket.IO client connected: {request.sid}")
-        # Start the cleanup task if not already started
-        start_cleanup_task()
+        try:
+            # Verifica dell'autenticazione
+            auth_header = request.headers.get('Authorization')
+            
+            if not auth_header:
+                logger.warning(f"Socket.IO connection rejected: Missing Authorization header")
+                disconnect()
+                return False
+                
+            token_payload = verify_token(auth_header)
+            if not token_payload:
+                logger.warning(f"Socket.IO connection rejected: Invalid token")
+                disconnect()
+                return False
+                
+            # Salva le informazioni dell'utente nella sessione
+            session_id = request.args.get('session_id')
+            user_id = token_payload.get('sub')
+            
+            logger.info(f"New Socket.IO client connected: {request.sid} - User: {user_id} - Session: {session_id}")
+            
+            # Start the cleanup task if not already started
+            start_cleanup_task()
+            return True
+        except Exception as e:
+            logger.error(f"Error in Socket.IO connection: {str(e)}")
+            disconnect()
+            return False
 
     @socketio.on('disconnect')
     def handle_disconnect():

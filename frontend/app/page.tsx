@@ -15,13 +15,12 @@ export default function Home() {
     }
   }, [user, isLoading]);
 
-  // Mostra un loader durante il caricamento
   if (isLoading) {
     return (
       <div className="flex justify-center items-center h-screen bg-slate-950 text-slate-50">
         <div className="text-center">
           <div className="w-16 h-16 border-t-4 border-blue-500 border-solid rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-xl">Caricamento...</p>
+          <p className="text-xl">Loading...</p>
         </div>
       </div>
     );

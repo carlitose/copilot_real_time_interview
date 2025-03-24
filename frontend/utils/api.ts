@@ -2,6 +2,8 @@
  * API client for REST calls to the backend
  */
 
+import { supabase } from './supabase';
+
 // Base URL for the API
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/api';
 
@@ -39,6 +41,23 @@ export interface Message {
   content: string;
 }
 
+/**
+ * Gets the authentication headers with the Supabase token
+ * @returns Promise with headers object including authorization token
+ */
+async function getAuthHeaders(): Promise<HeadersInit> {
+  const { data: { session } } = await supabase.auth.getSession();
+  const headers: HeadersInit = {
+    'Content-Type': 'application/json',
+  };
+  
+  if (session?.access_token) {
+    headers['Authorization'] = `Bearer ${session.access_token}`;
+  }
+  
+  return headers;
+}
+
 // API client
 const apiClient = {
   /**
@@ -47,11 +66,10 @@ const apiClient = {
    */
   async createSession(): Promise<string> {
     try {
+      const headers = await getAuthHeaders();
       const response = await fetch(`${API_BASE_URL}/sessions`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({}),
       });
       
@@ -74,11 +92,10 @@ const apiClient = {
    */
   async startSession(sessionId: string): Promise<boolean> {
     try {
+      const headers = await getAuthHeaders();
       const response = await fetch(`${API_BASE_URL}/sessions/start`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({ session_id: sessionId }),
       });
       
@@ -101,11 +118,10 @@ const apiClient = {
    */
   async endSession(sessionId: string): Promise<boolean> {
     try {
+      const headers = await getAuthHeaders();
       const response = await fetch(`${API_BASE_URL}/sessions/end`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({ session_id: sessionId }),
       });
       
@@ -129,11 +145,10 @@ const apiClient = {
    */
   async sendTextMessage(sessionId: string, text: string): Promise<boolean> {
     try {
+      const headers = await getAuthHeaders();
       const response = await fetch(`${API_BASE_URL}/sessions/text`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({ 
           session_id: sessionId,
           text: text 
@@ -160,11 +175,10 @@ const apiClient = {
    */
   async takeScreenshot(sessionId: string, screenId: string): Promise<boolean> {
     try {
+      const headers = await getAuthHeaders();
       const response = await fetch(`${API_BASE_URL}/sessions/screenshot`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({ 
           session_id: sessionId,
           monitor_index: parseInt(screenId, 10)
@@ -191,11 +205,10 @@ const apiClient = {
    */
   async sendScreenshot(sessionId: string, imageData: string): Promise<boolean> {
     try {
+      const headers = await getAuthHeaders();
       const response = await fetch(`${API_BASE_URL}/sessions/analyze-screenshot`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({ 
           session_id: sessionId,
           image_data: imageData
@@ -221,11 +234,10 @@ const apiClient = {
    */
   async startThinkProcess(sessionId: string): Promise<boolean> {
     try {
+      const headers = await getAuthHeaders();
       const response = await fetch(`${API_BASE_URL}/sessions/think`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({ session_id: sessionId }),
       });
       
@@ -248,11 +260,10 @@ const apiClient = {
    */
   async saveConversation(sessionId: string): Promise<any> {
     try {
+      const headers = await getAuthHeaders();
       const response = await fetch(`${API_BASE_URL}/sessions/save`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({ session_id: sessionId }),
       });
       
@@ -275,11 +286,10 @@ const apiClient = {
    */
   async getSessionStatus(sessionId: string): Promise<SessionStatusResponse | null> {
     try {
+      const headers = await getAuthHeaders();
       const response = await fetch(`${API_BASE_URL}/sessions/status?session_id=${sessionId}`, {
         method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
       });
       
       if (!response.ok) {
