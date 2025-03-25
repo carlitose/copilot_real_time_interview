@@ -198,3 +198,4 @@ out/
 saved_conversations/
 .cursor/
 supabase-local/
+.vscode/

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Startup script for Intervista Assistant.
-This script runs the application from the main directory.
+Startup script for Intervista Assistant Desktop App.
+This script runs the desktop application from the main directory.
 """
 
 import os
@@ -15,23 +15,23 @@ if __name__ == "__main__":
             level=logging.INFO,
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             handlers=[
-                logging.FileHandler("intervista_assistant.log"),
+                logging.FileHandler("desktop_app.log"),
                 logging.StreamHandler()
             ]
         )
         logger = logging.getLogger(__name__)
         
         # Startup message
-        logger.info("Starting Intervista Assistant...")
+        logger.info("Starting Intervista Assistant Desktop App...")
         
         # Import and run the application
-        from intervista_assistant.main import main
+        from desktop_app.main import main
         main()
         
     except ImportError as e:
         print(f"Import error: {e}")
         print("Ensure all required dependencies are installed.")
-        print("Run: pip install -r requirements.txt")
+        print("Run: cd desktop_app && poetry install")
         sys.exit(1)
         
     except Exception as e:

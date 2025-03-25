@@ -73,7 +73,7 @@ def main():
     
     try:
         # Import the flask application
-        from flask_app import create_app
+        from backend.flask_app import create_app
         
         # Create the application
         app, socketio = create_app()

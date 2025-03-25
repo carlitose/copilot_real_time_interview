@@ -7,7 +7,7 @@ Creates and launches the application's user interface.
 import sys
 import logging
 from PyQt5.QtWidgets import QApplication
-from .intervista_assistant import IntervistaAssistant
+from desktop_app.intervista_assistant import IntervistaAssistant
 
 # Logging configuration
 logging.basicConfig(level=logging.INFO, 

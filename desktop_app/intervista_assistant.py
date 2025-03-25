@@ -13,9 +13,9 @@ from PyQt5.QtCore import QObject, QThread, pyqtSignal, pyqtSlot
 from openai import OpenAI
 from dotenv import load_dotenv
 
-from .realtime_text_thread import RealtimeTextThread
-from .utils import ScreenshotManager
-from .ui import IntervistaAssistantUI
+from desktop_app.realtime_text_thread import RealtimeTextThread
+from desktop_app.utils import ScreenshotManager
+from desktop_app.ui import IntervistaAssistantUI
 
 # Logging configuration
 logging.basicConfig(level=logging.INFO, 

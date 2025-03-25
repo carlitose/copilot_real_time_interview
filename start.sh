@@ -44,7 +44,7 @@ fi
 
 # Determine the path of the current directory (where the script is located)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-BACKEND_DIR="$SCRIPT_DIR/intervista_assistant"
+BACKEND_DIR="$SCRIPT_DIR/backend"
 FRONTEND_DIR="$SCRIPT_DIR/frontend"
 
 # Check that the directories exist
@@ -83,6 +83,9 @@ fi
 # Set the port for the backend
 export PORT=$BACKEND_PORT
 
+# Ensure we're using the correct import paths by using PYTHONPATH
+export PYTHONPATH="$SCRIPT_DIR"
+
 # Run backend with output to console instead of background
 python api_launcher.py --port $BACKEND_PORT --host 0.0.0.0 $debug_option $no_reloader_option 2>&1 | tee "$SCRIPT_DIR/logs/backend.log" &
 BACKEND_PID=$!
@@ -95,6 +98,12 @@ sleep 5
 # Start the frontend in another terminal window on macOS
 echo "Starting the frontend (Next.js)..."
 cd "$FRONTEND_DIR" 
+
+# Check if Next.js is installed, and install it if it's not
+if ! npm list next | grep -q "next@"; then
+  echo "Next.js is not installed in the frontend project. Installing it now..."
+  npm install --save next react react-dom
+fi
 
 # Run frontend with output to console instead of background
 PORT=$FRONTEND_PORT npm run dev 2>&1 | tee "$SCRIPT_DIR/logs/frontend.log" &

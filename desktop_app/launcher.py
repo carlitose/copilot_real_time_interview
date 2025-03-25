@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 if __name__ == "__main__":
     # Import and start the application
-    from intervista_assistant.main import main
+    from desktop_app.main import main
     
     # Run the application
     main() 

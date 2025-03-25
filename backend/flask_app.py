@@ -10,8 +10,8 @@ from flask_cors import CORS
 from flask_socketio import SocketIO
 
 # Import from our modules
-from intervista_assistant.api.routes import register_routes
-from intervista_assistant.api.socketio_handlers import register_socketio_handlers
+from backend.api.routes import register_routes
+from backend.api.socketio_handlers import register_socketio_handlers
 
 # Logging configuration
 logging.basicConfig(
